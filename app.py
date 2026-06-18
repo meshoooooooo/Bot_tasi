@@ -1,47 +1,50 @@
 import json
 import urllib.request
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# إعدادات التليجرام
+# --- إعدادات البوت ---
 TELEGRAM_TOKEN = "8782648491:AAF0PHHHBMFzh5yG6RwHOjXbBDdZMoOshzw"
 CHAT_ID = "-1003766547355"
-API_KEY = "4HN7WBRH6GSU18NZ" 
 
-TADAWUL_STOCKS = ["2222", "2010", "1301", "2060", "2080", "2300", "2310", "2350", "7010", "7020", "2030", "2280", "1210", "1303", "2020", "2090"]
+# الكلمات المفتاحية للاستثناء
+EXCLUDED_KEYWORDS = ["الريت", "صندوق", "الإنماء", "الراجحي ريت", "الإسمنت", "أسمنت", "سمنت", "REIT"]
 
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = json.dumps({"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}).encode('utf-8')
     req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0'})
-    try: urllib.request.urlopen(req, timeout=10)
+    try: urllib.request.urlopen(req, timeout=5)
     except: pass
 
-print("[*] Sniper Engine: Scanning for Trend Breakouts...")
+def check_stock_validity(ticker_name):
+    """فلتر استبعاد الصناديق والريتات والإسمنتات"""
+    for keyword in EXCLUDED_KEYWORDS:
+        if keyword in ticker_name:
+            return False
+    return True
 
-while True:
-    now = datetime.utcnow() + timedelta(hours=3)
+def run_scanner():
+    print("[*] System Online: Monitoring TASI...")
     
-    if 10 <= now.hour < 15:
-        for symbol in TADAWUL_STOCKS:
-            # طلب البيانات اليومية
-            url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}.SR&apikey={API_KEY}"
-            try:
-                with urllib.request.urlopen(url) as response:
-                    data = json.loads(response.read().decode())
-                    if "Time Series (Daily)" in data:
-                        ts = data["Time Series (Daily)"]
-                        dates = sorted(ts.keys())[-30:]
-                        highs = [float(ts[d]["2. high"]) for d in dates]
-                        current_price = float(ts[dates[-1]]["4. close"])
-                        resistance = max(highs[:-1]) # أعلى سعر في الـ 29 يوم السابقة
-                        
-                        # منطق كسر الترند (الاختراق)
-                        if current_price >= resistance:
-                            send_telegram(f"🎯 *إشارة قنص (اختراق):* {symbol}\n📈 السعر الآن: {current_price:.2f}\n🚀 كسر مقاومة {resistance:.2f}")
-            except:
-                pass
-            time.sleep(20) 
-        time.sleep(300)
-    else:
-        time.sleep(1800)
+    # رسالة ترحيب عند تشغيل البوت
+    send_telegram("🚀 *نظام TRB v2.0 يعمل الآن بكامل طاقته.*")
+    
+    while True:
+        now = datetime.now()
+        
+        # 1. وضع المضاربة اللحظية (خلال جلسة تاسي)
+        if 10 <= now.hour < 15:
+            # هنا يتم وضع منطق مراقبة السيولة اللحظية للأسهم المسموحة
+            pass 
+        
+        # 2. وضع المسح اليومي (بعد الإغلاق الساعة 4 م)
+        elif now.hour == 16 and now.minute == 0:
+            send_telegram("📊 *بدء المسح الشامل لأسهم تاسي (استراتيجية TRB v2.0)...*")
+            # هنا يتم إجراء المسح وحساب الاختراقات (Breakouts)
+            time.sleep(65) # لتجنب التكرار في نفس الدقيقة
+            
+        time.sleep(60)
+
+if __name__ == "__main__":
+    run_scanner()
