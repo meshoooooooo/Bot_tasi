@@ -1,3 +1,4 @@
+import os
 import asyncio
 import aiohttp
 from datetime import datetime
@@ -5,8 +6,14 @@ import pytz
 import time
 import gc
 
-TOKEN = "8782648491:AAF0PHHHBMFzh5yG6RwHOjXbBDdZMoOshzw"
-CHAT_ID = "-1003766547355"
+# ============= قراءة المتغيرات من Secrets =============
+TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+if not TOKEN or not CHAT_ID:
+    print("❌ خطأ: تأكد من إضافة BOT_TOKEN و CHAT_ID في Secrets")
+    exit()
+
 RIYADH_TZ = pytz.timezone('Asia/Riyadh')
 
 STOCK_NAMES = {
@@ -74,7 +81,7 @@ tracker = {}
 stock_followup = {}
 daily_opportunities = []
 
-# ============= إعدادات الاستراتيجية (اختراق آخر قمة) =============
+# ============= إعدادات الاستراتيجية =============
 MIN_PRICE = 1.0
 MAX_PRICE = 150.0
 MIN_VOLUME = 1000000
@@ -82,7 +89,7 @@ MIN_MOMENTUM = 2.5
 MIN_VOLUME_RATIO = 2.0
 RSI_MIN = 45
 RSI_MAX = 65
-PREVIOUS_HIGH_LOOKBACK = 90  # آخر قمة خلال 90 يوم
+PREVIOUS_HIGH_LOOKBACK = 90
 
 TARGET_1_PCT = 0.05
 TARGET_2_PCT = 0.12
@@ -93,14 +100,20 @@ market_open_sent = False
 market_close_sent = False
 current_date = None
 
+# ============= الدوال المساعدة =============
 def get_stock_display(ticker):
     code = ticker.replace(".SR", "")
     name = STOCK_NAMES.get(code, code)
     return f"{name} ({code})"
 
-async def send_msg(session, msg):
+async def send_msg(session, msg, chat_id=None):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True}
+    payload = {
+        "chat_id": chat_id or CHAT_ID,
+        "text": msg,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
+    }
     try:
         async with session.post(url, json=payload) as resp:
             if resp.status != 200:
@@ -146,6 +159,167 @@ def get_targets(price):
 def get_trailing_stop(current_price, highest_price):
     return highest_price * (1 - TRAILING_STOP_PCT)
 
+# ============= دوال التحليل والاستراتيجيات =============
+async def handle_analysis_command(session, chat_id, ticker_code=None):
+    """تحليل سهم معين أو عرض نظرة عامة"""
+    if ticker_code:
+        ticker = f"{ticker_code}.SR"
+        if ticker not in ALL_TICKERS:
+            await send_msg(session, f"❌ الكود {ticker_code} غير صحيح أو غير موجود.", chat_id)
+            return
+        
+        data = await fetch_ticker_data(ticker)
+        if not data:
+            await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code}. حاول لاحقاً.", chat_id)
+            return
+        
+        display = get_stock_display(ticker)
+        price = data["price"]
+        change = data["change"]
+        volume = data["volume"]
+        volume_ratio = data["volume_ratio"]
+        rsi = data["rsi"]
+        strength = data["strength"]
+        previous_high = data["previous_high"]
+        
+        target1, target2, target3 = get_targets(price)
+        trailing_stop = get_trailing_stop(price, price)
+        
+        s_text = "💥 قوي جداً" if strength >= 75 else "🚀 قوي" if strength >= 60 else "📈 متوسط"
+        
+        msg = f"""📊 *تحليل {display}*
+
+💰 السعر: {price:.2f} ريال
+📈 التغيير: +{change:.2f}%
+📊 الحجم: {volume:,} | نسبة: {volume_ratio:.1f}x
+📉 RSI: {rsi:.0f}
+💪 القوة: {s_text} ({strength:.0f})
+📌 القمة السابقة: {previous_high:.2f}
+
+🎯 الأهداف:
+1️⃣ {target1:.2f} (+{TARGET_1_PCT*100:.0f}%)
+2️⃣ {target2:.2f} (+{TARGET_2_PCT*100:.0f}%)
+3️⃣ {target3:.2f} (+{TARGET_3_PCT*100:.0f}%)
+
+🛑 وقف متحرك: {trailing_stop:.2f}"""
+        await send_msg(session, msg, chat_id)
+    else:
+        msg = f"""📊 *نظرة عامة على السوق*
+
+📌 إجمالي الأسهم المراقبة: {len(ACTIVE_TICKERS)}
+📈 استراتيجية: اختراق آخر قمة (90 يوم)
+🎯 أهداف: {TARGET_1_PCT*100:.0f}% / {TARGET_2_PCT*100:.0f}% / {TARGET_3_PCT*100:.0f}%
+🛡️ وقف متحرك: {TRAILING_STOP_PCT*100:.0f}%
+
+🔍 *لتحليل سهم محدد:* أرسل `/تحليل [الكود]`
+مثال: `/تحليل 2222`"""
+        await send_msg(session, msg, chat_id)
+
+async def handle_strategy_command(session, chat_id):
+    msg = f"""📈 *استراتيجية اختراق آخر قمة*
+
+🔍 *كيف تعمل؟*
+نبحث عن الأسهم التي:
+1️⃣ تخترق أعلى سعر لها خلال 90 يوماً
+2️⃣ حجم تداول أعلى من المتوسط بـ {MIN_VOLUME_RATIO}x
+3️⃣ زخم سعري +{MIN_MOMENTUM}% أو أكثر
+4️⃣ مؤشر RSI بين {RSI_MIN} و {RSI_MAX}
+5️⃣ سيولة عالية (حجم > {MIN_VOLUME:,})
+6️⃣ السعر بين {MIN_PRICE} - {MAX_PRICE} ريال
+
+🎯 *الأهداف:*
+• الهدف 1: +{TARGET_1_PCT*100:.0f}%
+• الهدف 2: +{TARGET_2_PCT*100:.0f}%
+• الهدف 3: +{TARGET_3_PCT*100:.0f}%
+
+🛡️ *إدارة المخاطر:*
+• وقف خسارة متحرك بـ {TRAILING_STOP_PCT*100:.0f}%
+• يتم رفع الوقف مع ارتفاع السعر
+
+📌 *ملاحظة:* هذا تحليل فني، ليس نصيحة استثمارية."""
+    await send_msg(session, msg, chat_id)
+
+async def handle_help_command(session, chat_id):
+    msg = f"""🤖 *أوامر البوت المتاحة:*
+
+/تحليل [كود السهم] - تحليل سهم محدد
+مثال: `/تحليل 2222` (لأرامكو)
+
+/تحليل - عرض نظرة عامة على السوق
+
+/استراتيجيات - شرح استراتيجية البوت
+
+/الفرص - عرض أفضل الفرص الحالية
+
+/مساعده - عرض هذه القائمة
+
+📌 *ملاحظة:* يمكنك كتابة الأوامر بدون "/" أيضاً."""
+    await send_msg(session, msg, chat_id)
+
+async def handle_opportunities_command(session, chat_id):
+    if not daily_opportunities:
+        await send_msg(session, "⚠️ لا توجد فرص حالياً. انتظر ظهور فرص جديدة.", chat_id)
+        return
+    
+    daily_opportunities.sort(key=lambda x: x['strength'], reverse=True)
+    top_5 = daily_opportunities[:5]
+    
+    msg = f"🚀 *أفضل 5 فرص حالياً*\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, opp in enumerate(top_5, 1):
+        icon = "💥" if opp['strength'] >= 75 else "🚀" if opp['strength'] >= 60 else "📈"
+        msg += f"{i}. {icon} *{opp['display_name']}*\n   💵 {opp['price']:.2f} | قوة: {opp['strength']}/100\n   📊 حجم {opp['volume_ratio']:.1f}x | زخم +{opp['change']:.2f}%\n\n"
+    await send_msg(session, msg, chat_id)
+
+# ============= دالة جلب البيانات =============
+async def fetch_ticker_data(ticker):
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                if not data.get("chart", {}).get("result"):
+                    return None
+                result = data["chart"]["result"][0]
+                meta = result.get("meta", {})
+                quote = result.get("indicators", {}).get("quote", [{}])[0]
+                current_price = meta.get("regularMarketPrice", 0)
+                previous_close = meta.get("previousClose", current_price)
+                current_volume = meta.get("regularMarketVolume", 0)
+                if current_price <= 0 or current_volume <= 0:
+                    return None
+                volumes = quote.get("volume", [])
+                closes = quote.get("close", [])
+                highs = quote.get("high", [])
+                prev_volume = volumes[-2] if len(volumes) >= 2 and volumes[-2] else current_volume
+                change = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
+                avg_volume = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else current_volume
+                volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+                rsi = calculate_rsi(closes)
+                ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else current_price
+                high_20d = max(highs[-20:]) if len(highs) >= 20 else current_price
+                high_60d = max(highs[-60:]) if len(highs) >= 60 else current_price
+                previous_high = max(highs[-PREVIOUS_HIGH_LOOKBACK:]) if len(highs) >= PREVIOUS_HIGH_LOOKBACK else current_price
+                is_above_ma20 = current_price > ma20
+                is_breakout_20d = current_price > high_20d
+                is_breakout_60d = current_price > high_60d
+                is_breakout_previous_high = current_price > previous_high
+                is_high_volume = volume_ratio >= MIN_VOLUME_RATIO
+                is_good_momentum = change >= MIN_MOMENTUM
+                is_good_rsi = RSI_MIN <= rsi <= RSI_MAX
+                is_high_liquidity = current_volume >= MIN_VOLUME
+                if (is_good_momentum and is_high_volume and is_breakout_previous_high and 
+                    is_good_rsi and is_high_liquidity and is_above_ma20 and
+                    MIN_PRICE <= current_price <= MAX_PRICE):
+                    strength = calculate_strength_score(change, volume_ratio, rsi, is_breakout_20d, is_breakout_60d, is_above_ma20)
+                    return {"ticker": ticker, "price": current_price, "change": change, "volume": current_volume, "volume_ratio": volume_ratio, "rsi": rsi, "strength": strength, "previous_high": previous_high}
+                return None
+    except:
+        return None
+
+# ============= دوال المتابعة والملخص =============
 async def check_and_update_followups(session, now_riyadh):
     global stock_followup
     to_remove = []
@@ -197,74 +371,72 @@ async def send_daily_summary(session):
     await send_msg(session, msg)
     daily_opportunities = []
 
-async def fetch_ticker_data(ticker):
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                if not data.get("chart", {}).get("result"):
-                    return None
-                result = data["chart"]["result"][0]
-                meta = result.get("meta", {})
-                quote = result.get("indicators", {}).get("quote", [{}])[0]
-                current_price = meta.get("regularMarketPrice", 0)
-                previous_close = meta.get("previousClose", current_price)
-                current_volume = meta.get("regularMarketVolume", 0)
-                if current_price <= 0 or current_volume <= 0:
-                    return None
-                volumes = quote.get("volume", [])
-                closes = quote.get("close", [])
-                highs = quote.get("high", [])
-                prev_volume = volumes[-2] if len(volumes) >= 2 and volumes[-2] else current_volume
-                change = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
-                avg_volume = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else current_volume
-                volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-                rsi = calculate_rsi(closes)
-                ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else current_price
-                high_20d = max(highs[-20:]) if len(highs) >= 20 else current_price
-                high_60d = max(highs[-60:]) if len(highs) >= 60 else current_price
-                previous_high = max(highs[-PREVIOUS_HIGH_LOOKBACK:]) if len(highs) >= PREVIOUS_HIGH_LOOKBACK else current_price
-                is_above_ma20 = current_price > ma20
-                is_breakout_20d = current_price > high_20d
-                is_breakout_60d = current_price > high_60d
-                is_breakout_previous_high = current_price > previous_high  # الشرط الجديد
-                is_high_volume = volume_ratio >= MIN_VOLUME_RATIO
-                is_good_momentum = change >= MIN_MOMENTUM
-                is_good_rsi = RSI_MIN <= rsi <= RSI_MAX
-                is_high_liquidity = current_volume >= MIN_VOLUME
-                if (is_good_momentum and is_high_volume and is_breakout_previous_high and 
-                    is_good_rsi and is_high_liquidity and is_above_ma20 and
-                    MIN_PRICE <= current_price <= MAX_PRICE):
-                    strength = calculate_strength_score(change, volume_ratio, rsi, is_breakout_20d, is_breakout_60d, is_above_ma20)
-                    return {"ticker": ticker, "price": current_price, "change": change, "volume": current_volume, "volume_ratio": volume_ratio, "rsi": rsi, "strength": strength, "previous_high": previous_high}
-                return None
-    except:
-        return None
-
+# ============= الدالة الرئيسية =============
 async def main():
     global market_open_sent, market_close_sent, current_date, daily_opportunities
+    
     async with aiohttp.ClientSession() as session:
-        await send_msg(session, f"✅ *البوت يعمل الان جاري المتابعة*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📈 استراتيجية اختراق آخر قمة\n🎯 أهداف: {TARGET_1_PCT*100:.0f}% / {TARGET_2_PCT*100:.0f}% / {TARGET_3_PCT*100:.0f}%\n🛡️ وقف متحرك: {TRAILING_STOP_PCT*100:.0f}%")
+        await send_msg(session, f"✅ *البوت يعمل الان جاري المتابعة*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📈 استراتيجية اختراق آخر قمة\n🎯 أهداف: {TARGET_1_PCT*100:.0f}% / {TARGET_2_PCT*100:.0f}% / {TARGET_3_PCT*100:.0f}%\n🛡️ وقف متحرك: {TRAILING_STOP_PCT*100:.0f}%\n\n🤖 أرسل `/مساعده` لمعرفة الأوامر المتاحة.")
+        
+        last_update_id = 0
+        
         while True:
             now_riyadh = datetime.now(RIYADH_TZ)
             market_open_time = now_riyadh.replace(hour=10, minute=0, second=0)
             market_close_time = now_riyadh.replace(hour=15, minute=0, second=0)
+            
             if current_date != now_riyadh.date():
                 current_date = now_riyadh.date()
                 market_open_sent = False
                 market_close_sent = False
                 daily_opportunities = []
+            
             if not market_open_sent and now_riyadh >= market_open_time and now_riyadh < market_close_time:
                 market_open_sent = True
                 await send_msg(session, f"🔔 *فتح السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
+            
             if not market_close_sent and now_riyadh >= market_close_time:
                 market_close_sent = True
                 await send_msg(session, f"🔔 *إغلاق السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}\n📊 جاري الملخص...")
                 await send_daily_summary(session)
+            
+            # ============= معالجة الأوامر =============
+            try:
+                updates_url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
+                async with session.get(updates_url) as resp:
+                    if resp.status == 200:
+                        updates_data = await resp.json()
+                        if updates_data.get("ok"):
+                            for update in updates_data.get("result", []):
+                                last_update_id = update["update_id"]
+                                if "message" in update and "text" in update["message"]:
+                                    text = update["message"]["text"].strip()
+                                    chat_id = update["message"]["chat"]["id"]
+                                    
+                                    if str(chat_id) == str(CHAT_ID):
+                                        continue
+                                    
+                                    text_lower = text.lower()
+                                    
+                                    if text_lower.startswith("/تحليل") or text_lower.startswith("تحليل"):
+                                        parts = text.split()
+                                        if len(parts) > 1 and parts[1].isdigit():
+                                            await handle_analysis_command(session, chat_id, parts[1])
+                                        else:
+                                            await handle_analysis_command(session, chat_id)
+                                    
+                                    elif text_lower.startswith("/استراتيجيات") or text_lower == "استراتيجيات":
+                                        await handle_strategy_command(session, chat_id)
+                                    
+                                    elif text_lower.startswith("/الفرص") or text_lower == "الفرص":
+                                        await handle_opportunities_command(session, chat_id)
+                                    
+                                    elif text_lower.startswith("/مساعده") or text_lower == "مساعده":
+                                        await handle_help_command(session, chat_id)
+            except Exception as e:
+                print(f"خطأ في جلب الرسائل: {e}")
+            
+            # ============= مراقبة السوق =============
             if market_open_time <= now_riyadh <= market_close_time:
                 await check_and_update_followups(session, now_riyadh)
                 for i, ticker in enumerate(ACTIVE_TICKERS):
@@ -294,6 +466,7 @@ async def main():
                         gc.collect()
                         await asyncio.sleep(0.5)
                 gc.collect()
+            
             await asyncio.sleep(60)
 
 if __name__ == "__main__":
