@@ -146,7 +146,7 @@ async def fetch_data(ticker):
                 closes = quote.get("close", [])
                 highs = quote.get("high", [])
                 lows = quote.get("low", [])
-                if not closes or not highs or not lows:
+                if not closes:
                     return None
                 return {
                     "price": price,
@@ -172,7 +172,6 @@ async def analyze_stock(ticker, code, data):
     
     trend = "صاعد" if price > ma50 else "هابط"
     
-    # الكشف عن النموذج الفني
     pattern = "لا يوجد نموذج واضح حالياً"
     if price > prev_high:
         pattern = "اختراق قمة سابقة (إيجابي)"
@@ -243,7 +242,6 @@ async def scalping_check(ticker, data, now):
     
     closes = data["closes"]
     highs = data["highs"]
-    lows = data["lows"]
     price = data["price"]
     
     if len(closes) < 20:
