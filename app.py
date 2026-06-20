@@ -132,30 +132,41 @@ async def fetch_data(ticker):
         headers = {"User-Agent": "Mozilla/5.0"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
+                # نتحقق من حالة الاتصال
                 if resp.status != 200:
-                    return None
+                    return {"error": f"تعذر الاتصال بـ Yahoo (خطأ {resp.status})"}
+                
                 data = await resp.json()
                 if not data.get("chart", {}).get("result"):
-                    return None
+                    return {"error": "لم يتم العثور على بيانات لهذا الرمز في قاعدة بيانات Yahoo"}
+                
                 result = data["chart"]["result"][0]
                 meta = result.get("meta", {})
                 quote = result.get("indicators", {}).get("quote", [{}])[0]
+                
                 price = meta.get("regularMarketPrice", 0)
                 if price <= 0:
-                    return None
+                    return {"error": "البيانات الموجودة غير صالحة (سعر السهم غير متوفر)"}
+                
                 closes = quote.get("close", [])
                 highs = quote.get("high", [])
                 lows = quote.get("low", [])
-                if not closes:
-                    return None
+                
+                # إذا لم توجد شموع كافية، نرسل خطأ واضحاً
+                if not closes or len(closes) < 5:
+                    return {"error": "تاريخ البيانات لهذا السهم قصير جداً، لا يمكن تحليله حالياً"}
+                
                 return {
+                    "success": True,
                     "price": price,
                     "closes": closes,
                     "highs": highs,
                     "lows": lows
                 }
-    except:
-        return None
+    except aiohttp.ClientError as e:
+        return {"error": f"مشكلة في الاتصال بالخادم: {str(e)}"}
+    except Exception as e:
+        return {"error": f"خطأ غير متوقع أثناء معالجة البيانات: {str(e)}"}
 
 async def analyze_stock(ticker, code, data):
     closes = data["closes"]
@@ -204,12 +215,18 @@ async def analyze_stock(ticker, code, data):
 async def handle_analysis_command(session, chat_id, code):
     ticker = f"{code}.SR"
     if ticker not in ALL_TICKERS:
-        await send_msg(session, f"❌ الكود {code} غير موجود.", chat_id)
+        await send_msg(session, f"❌ الكود {code} غير موجود في قائمة الأسهم.", chat_id)
         return
     
     data = await fetch_data(ticker)
-    if not data:
-        await send_msg(session, f"❌ تعذر جلب بيانات {code}.", chat_id)
+    
+    # معالجة الأخطاء بذكاء
+    if data.get("error"):
+        await send_msg(session, f"❌ تعذر تحليل الرمز {code}\n\nالسبب: {data['error']}\n\n💡 ملاحظة: إذا كان السهم مدرجاً حديثاً، قد تحتاج للانتظار بضعة أيام حتى تتوفر بياناته في Yahoo.", chat_id)
+        return
+    
+    if not data.get("success"):
+        await send_msg(session, f"❌ حدث خطأ غير معروف أثناء محاولة تحليل {code}.", chat_id)
         return
     
     analysis = await analyze_stock(ticker, code, data)
@@ -237,7 +254,7 @@ async def handle_analysis_command(session, chat_id, code):
 
 async def scalping_check(ticker, data, now):
     global alert_tracker
-    if not data:
+    if not data or data.get("error"):
         return None
     
     closes = data["closes"]
