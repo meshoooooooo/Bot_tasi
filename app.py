@@ -8,10 +8,9 @@ import gc
 
 TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-ALPHA_KEY = os.getenv("ALPHA_KEY")  # سيقرأ مفتاحك من Railway
 
-if not TOKEN or not CHAT_ID or not ALPHA_KEY:
-    print("❌ تأكد من إضافة BOT_TOKEN و CHAT_ID و ALPHA_KEY في Secrets")
+if not TOKEN or not CHAT_ID:
+    print("❌ تأكد من إضافة BOT_TOKEN و CHAT_ID في Secrets")
     exit()
 
 RIYADH_TZ = pytz.timezone('Asia/Riyadh')
@@ -131,7 +130,7 @@ def get_targets(price):
     return (price * 1.03, price * 1.06, price * 1.10)
 
 async def fetch_yahoo_data(ticker):
-    """للقناة - تستخدم Yahoo كما كانت"""
+    """جلب البيانات من Yahoo (للتحليل والقناة)"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -154,38 +153,6 @@ async def fetch_yahoo_data(ticker):
                 volumes = quote.get("volume", [])
                 if not closes or not highs or not lows:
                     return None
-                return {
-                    "price": price,
-                    "closes": closes,
-                    "highs": highs,
-                    "lows": lows,
-                    "volumes": volumes
-                }
-    except:
-        return None
-
-async def fetch_alpha_data(ticker):
-    """للخاص - تستخدم Alpha Vantage مع مفتاحك"""
-    try:
-        code = ticker.replace(".SR", "")
-        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={code}.SR&apikey={ALPHA_KEY}&outputsize=full"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                if "Time Series (Daily)" not in data:
-                    return None
-                ts = data["Time Series (Daily)"]
-                dates = sorted(ts.keys(), reverse=True)
-                if len(dates) < 30:
-                    return None
-                closes = [float(ts[d]["4. close"]) for d in dates]
-                highs = [float(ts[d]["2. high"]) for d in dates]
-                lows = [float(ts[d]["3. low"]) for d in dates]
-                volumes = [int(ts[d]["5. volume"]) for d in dates]
-                price = closes[0]
                 return {
                     "price": price,
                     "closes": closes,
@@ -254,15 +221,15 @@ async def handle_analysis_command(session, chat_id, ticker_code=None):
         await send_msg(session, f"❌ الكود {ticker_code} غير موجود.", chat_id)
         return
     
-    # استخدام Alpha Vantage للتحليل السريع
-    data = await fetch_alpha_data(ticker)
+    # استخدام Yahoo للتحليل (تم إزالة Alpha Vantage)
+    data = await fetch_yahoo_data(ticker)
     if not data:
-        await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code} من Alpha Vantage.", chat_id)
+        await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code} من Yahoo.", chat_id)
         return
     
     analysis = await analyze_stock(ticker, data)
     
-    msg = f"""📊 *تحليل فني سريع لـ {analysis['display']}*
+    msg = f"""📊 *تحليل فني لـ {analysis['display']}*
 
 💰 السعر: {analysis['price']:.2f} ريال
 📈 التغيير: +{analysis['change']:.2f}%
@@ -334,7 +301,7 @@ async def scalping_check(ticker, data, now):
 
 async def scan_market_for_scalps(session, now):
     for ticker in ACTIVE_TICKERS:
-        data = await fetch_yahoo_data(ticker)  # القناة تستخدم Yahoo
+        data = await fetch_yahoo_data(ticker)
         signal = await scalping_check(ticker, data, now)
         if signal:
             msg = f"""⚡ *تنبيه مضاربة - اختراق ترند هابط*
@@ -357,7 +324,7 @@ async def main():
     global market_open_sent, market_close_sent, current_date, daily_opportunities
     
     async with aiohttp.ClientSession() as session:
-        await send_msg(session, f"✅ *بوت التحليل والمضاربة (Alpha Vantage)*\n\n📊 {len(ACTIVE_TICKERS)} شركة\n⚡ التحليل الخاص سريع جداً.")
+        await send_msg(session, f"✅ *البوت يعمل بنجاح (Yahoo)*\n\n📊 {len(ACTIVE_TICKERS)} شركة\n📌 للتحليل: `/تحليل [الكود]`")
         
         last_update_id = 0
         
@@ -406,7 +373,7 @@ async def main():
                                     elif text_lower in ["/start", "قائمة"]:
                                         await send_msg(session, "📊 *مرحباً*\n\nأرسل `/تحليل [الكود]` لتحليل سريع.", chat_id)
                                     elif text_lower in ["/مساعده", "مساعده"]:
-                                        await send_msg(session, "🤖 *الأوامر:*\n/تحليل [كود] - تحليل فني سريع\n/start - الترحيب\n/مساعده - الدليل", chat_id)
+                                        await send_msg(session, "🤖 *الأوامر:*\n/تحليل [كود] - تحليل فني\n/start - الترحيب\n/مساعده - الدليل", chat_id)
             except Exception as e:
                 print(f"خطأ في جلب الرسائل: {e}")
             
@@ -417,5 +384,5 @@ async def main():
             await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    print(f"بدء البوت... {len(ACTIVE_TICKERS)} شركة (Alpha Vantage)")
+    print(f"بدء البوت... {len(ACTIVE_TICKERS)} شركة")
     asyncio.run(main())
