@@ -1,7 +1,7 @@
 import os
 import asyncio
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 import time
 import gc
@@ -16,7 +16,7 @@ if not TOKEN or not CHAT_ID:
 
 RIYADH_TZ = pytz.timezone('Asia/Riyadh')
 
-# ============= قائمة الأسهم =============
+# ============= قائمة الأسهم (كاملة) =============
 STOCK_NAMES = {
     "2222": "أرامكو السعودية", "1211": "معادن", "7010": "اس تي سي", "2010": "سابك",
     "2082": "أكوا", "4013": "سليمان الحبيب", "5110": "السعودية للطاقة", "2020": "سابك للمغذيات الزراعية",
@@ -87,9 +87,7 @@ daily_opportunities = []    # لملخص نهاية اليوم
 
 # ============= إعدادات التحليل =============
 RSI_PERIOD = 14
-MA_PERIOD_20 = 20
-MA_PERIOD_50 = 50
-TREND_LOOKBACK = 90
+PREVIOUS_HIGH_LOOKBACK = 90
 
 # ============= إعدادات المضاربة =============
 SCALP_MIN_VOLUME_RATIO = 2.0
@@ -138,9 +136,6 @@ def calculate_rsi(closes, period=14):
 def get_targets(price):
     return (price * 1.03, price * 1.06, price * 1.10)
 
-def get_trailing_stop(current_price, highest_price):
-    return highest_price * 0.97
-
 # ============= تحليل السهم المتقدم (الخاص) =============
 async def fetch_daily_data(ticker):
     try:
@@ -149,21 +144,25 @@ async def fetch_daily_data(ticker):
         async with aiohttp.ClientSession() as s:
             async with s.get(url, headers=headers) as resp:
                 if resp.status != 200:
+                    print(f"⚠️ Yahoo رفض الطلب للرمز {ticker} (الحالة: {resp.status})")
                     return None
                 data = await resp.json()
                 if not data.get("chart", {}).get("result"):
+                    print(f"⚠️ لا توجد بيانات للرمز {ticker}")
                     return None
                 result = data["chart"]["result"][0]
                 meta = result.get("meta", {})
                 quote = result.get("indicators", {}).get("quote", [{}])[0]
                 price = meta.get("regularMarketPrice", 0)
                 if price <= 0:
+                    print(f"⚠️ السعر غير صالح للرمز {ticker}")
                     return None
                 closes = quote.get("close", [])
                 highs = quote.get("high", [])
                 lows = quote.get("low", [])
                 volumes = quote.get("volume", [])
                 if not closes or not highs or not lows:
+                    print(f"⚠️ بيانات الشموع ناقصة للرمز {ticker}")
                     return None
                 return {
                     "price": price,
@@ -172,7 +171,8 @@ async def fetch_daily_data(ticker):
                     "lows": lows,
                     "volumes": volumes
                 }
-    except:
+    except Exception as e:
+        print(f"❌ خطأ تقني أثناء جلب {ticker}: {e}")
         return None
 
 async def analyze_stock(ticker, data):
@@ -196,6 +196,7 @@ async def analyze_stock(ticker, data):
     # النماذج الفنية
     pattern = "لا يوجد نموذج واضح"
     if len(lows) >= 60:
+        # كشف بسيط للدبل بوتوم (قاعان متساويان مع قمة بينهما)
         low1 = min(lows[-60:-30])
         low2 = min(lows[-30:])
         if abs(low1 - low2) / low1 < 0.02 and low2 >= low1 and price > max(lows[-60:]):
@@ -244,12 +245,12 @@ async def handle_analysis_command(session, chat_id, ticker_code=None):
     
     ticker = f"{ticker_code}.SR"
     if ticker not in ALL_TICKERS:
-        await send_msg(session, f"❌ الكود {ticker_code} غير صحيح.", chat_id)
+        await send_msg(session, f"❌ الكود {ticker_code} غير موجود في القائمة.", chat_id)
         return
     
     data = await fetch_daily_data(ticker)
     if not data:
-        await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code}.", chat_id)
+        await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code} من Yahoo.\nالسبب المحتمل: السوق مغلق، أو السهم غير مدرج بشكل صحيح.\nجرب رمزاً آخر (مثل 1211 أو 2010).", chat_id)
         return
     
     analysis = await analyze_stock(ticker, data)
@@ -394,6 +395,11 @@ async def main():
                                 if "message" in update and "text" in update["message"]:
                                     text = update["message"]["text"].strip()
                                     chat_id = update["message"]["chat"]["id"]
+                                    
+                                    # تجاهل رسائل القناة نفسها
+                                    if str(chat_id) == str(CHAT_ID):
+                                        continue
+                                    
                                     text_lower = text.lower()
                                     if text_lower.startswith("/تحليل") or text_lower.startswith("تحليل"):
                                         parts = text.split()
