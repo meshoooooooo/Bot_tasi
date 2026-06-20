@@ -6,17 +6,16 @@ import pytz
 import time
 import gc
 
-# ============= إعدادات البيئة =============
 TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+ALPHA_KEY = os.getenv("ALPHA_KEY")  # سيقرأ مفتاحك من Railway
 
-if not TOKEN or not CHAT_ID:
-    print("❌ تأكد من إضافة BOT_TOKEN و CHAT_ID في Secrets")
+if not TOKEN or not CHAT_ID or not ALPHA_KEY:
+    print("❌ تأكد من إضافة BOT_TOKEN و CHAT_ID و ALPHA_KEY في Secrets")
     exit()
 
 RIYADH_TZ = pytz.timezone('Asia/Riyadh')
 
-# ============= قائمة الأسهم (كاملة) =============
 STOCK_NAMES = {
     "2222": "أرامكو السعودية", "1211": "معادن", "7010": "اس تي سي", "2010": "سابك",
     "2082": "أكوا", "4013": "سليمان الحبيب", "5110": "السعودية للطاقة", "2020": "سابك للمغذيات الزراعية",
@@ -70,31 +69,26 @@ STOCK_NAMES = {
 
 ALL_TICKERS = [f"{code}.SR" for code in STOCK_NAMES.keys()]
 
-# ============= استبعاد البنوك والإسمنت =============
 BANKS_EXCLUDED = ["1060.SR", "1080.SR", "1120.SR", "1140.SR", "1150.SR", "1211.SR", "1301.SR", "1320.SR", "1350.SR"]
 CEMENTS = ["3001.SR", "3002.SR", "3003.SR", "3004.SR", "3005.SR", "3007.SR", "3008.SR", "3010.SR", "3011.SR", "3012.SR", "3030.SR", "3080.SR", "3090.SR", "3091.SR", "3092.SR"]
 REITS = ["4330.SR", "4331.SR", "4332.SR", "4333.SR", "4334.SR", "4335.SR", "4336.SR", "4337.SR", "4338.SR", "4339.SR", "4340.SR", "4341.SR", "4342.SR", "4343.SR", "4344.SR", "4345.SR"]
 EXCLUDED = set(BANKS_EXCLUDED + CEMENTS + REITS)
 ACTIVE_TICKERS = [t for t in ALL_TICKERS if t not in EXCLUDED]
 
-# ============= متغيرات عامة =============
 market_open_sent = False
 market_close_sent = False
 current_date = None
-alert_tracker = {}          # لتجنب تكرار تنبيهات المضاربة
-stock_followup = {}         # لمتابعة الأهداف
-daily_opportunities = []    # لملخص نهاية اليوم
+alert_tracker = {}          
+stock_followup = {}         
+daily_opportunities = []    
 
-# ============= إعدادات التحليل =============
 RSI_PERIOD = 14
 PREVIOUS_HIGH_LOOKBACK = 90
 
-# ============= إعدادات المضاربة =============
 SCALP_MIN_VOLUME_RATIO = 2.0
 SCALP_MIN_RSI = 30
-SCALP_COOLDOWN = 1800       # 30 دقيقة
+SCALP_COOLDOWN = 1800       
 
-# ============= وظائف مساعدة =============
 def get_stock_display(ticker):
     code = ticker.replace(".SR", "")
     return f"{STOCK_NAMES.get(code, code)} ({code})"
@@ -136,33 +130,29 @@ def calculate_rsi(closes, period=14):
 def get_targets(price):
     return (price * 1.03, price * 1.06, price * 1.10)
 
-# ============= تحليل السهم المتقدم (الخاص) =============
-async def fetch_daily_data(ticker):
+async def fetch_yahoo_data(ticker):
+    """للقناة - تستخدم Yahoo كما كانت"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         headers = {"User-Agent": "Mozilla/5.0"}
         async with aiohttp.ClientSession() as s:
             async with s.get(url, headers=headers) as resp:
                 if resp.status != 200:
-                    print(f"⚠️ Yahoo رفض الطلب للرمز {ticker} (الحالة: {resp.status})")
                     return None
                 data = await resp.json()
                 if not data.get("chart", {}).get("result"):
-                    print(f"⚠️ لا توجد بيانات للرمز {ticker}")
                     return None
                 result = data["chart"]["result"][0]
                 meta = result.get("meta", {})
                 quote = result.get("indicators", {}).get("quote", [{}])[0]
                 price = meta.get("regularMarketPrice", 0)
                 if price <= 0:
-                    print(f"⚠️ السعر غير صالح للرمز {ticker}")
                     return None
                 closes = quote.get("close", [])
                 highs = quote.get("high", [])
                 lows = quote.get("low", [])
                 volumes = quote.get("volume", [])
                 if not closes or not highs or not lows:
-                    print(f"⚠️ بيانات الشموع ناقصة للرمز {ticker}")
                     return None
                 return {
                     "price": price,
@@ -171,8 +161,39 @@ async def fetch_daily_data(ticker):
                     "lows": lows,
                     "volumes": volumes
                 }
-    except Exception as e:
-        print(f"❌ خطأ تقني أثناء جلب {ticker}: {e}")
+    except:
+        return None
+
+async def fetch_alpha_data(ticker):
+    """للخاص - تستخدم Alpha Vantage مع مفتاحك"""
+    try:
+        code = ticker.replace(".SR", "")
+        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={code}.SR&apikey={ALPHA_KEY}&outputsize=full"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                if "Time Series (Daily)" not in data:
+                    return None
+                ts = data["Time Series (Daily)"]
+                dates = sorted(ts.keys(), reverse=True)
+                if len(dates) < 30:
+                    return None
+                closes = [float(ts[d]["4. close"]) for d in dates]
+                highs = [float(ts[d]["2. high"]) for d in dates]
+                lows = [float(ts[d]["3. low"]) for d in dates]
+                volumes = [int(ts[d]["5. volume"]) for d in dates]
+                price = closes[0]
+                return {
+                    "price": price,
+                    "closes": closes,
+                    "highs": highs,
+                    "lows": lows,
+                    "volumes": volumes
+                }
+    except:
         return None
 
 async def analyze_stock(ticker, data):
@@ -182,7 +203,6 @@ async def analyze_stock(ticker, data):
     volumes = data["volumes"]
     price = data["price"]
     
-    # المؤشرات
     rsi = calculate_rsi(closes, RSI_PERIOD)
     ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else price
     ma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else price
@@ -190,25 +210,17 @@ async def analyze_stock(ticker, data):
     low_30d = min(lows[-30:]) if len(lows) >= 30 else price
     previous_high = max(highs[-PREVIOUS_HIGH_LOOKBACK:]) if len(highs) >= PREVIOUS_HIGH_LOOKBACK else price
     
-    # الترند
     trend = "صاعد" if price > ma50 else "هابط"
-    
-    # النماذج الفنية
     pattern = "لا يوجد نموذج واضح"
     if len(lows) >= 60:
-        # كشف بسيط للدبل بوتوم (قاعان متساويان مع قمة بينهما)
         low1 = min(lows[-60:-30])
         low2 = min(lows[-30:])
         if abs(low1 - low2) / low1 < 0.02 and low2 >= low1 and price > max(lows[-60:]):
             pattern = "نموذج قاع مزدوج (Double Bottom) - إيجابي"
     
-    # الاختراق
     is_breakout = price > previous_high
-    
-    # التقييم العام
     evaluation = "إيجابي 🟢" if (price > ma50 and rsi > 50 and is_breakout) else "سلبي 🔴" if (price < ma50 and rsi < 50) else "محايد 🟡"
     
-    # الأهداف والوقف
     t1, t2, t3 = get_targets(price)
     stop_loss = low_30d * 0.97
     
@@ -233,54 +245,42 @@ async def analyze_stock(ticker, data):
 
 async def handle_analysis_command(session, chat_id, ticker_code=None):
     if not ticker_code:
-        msg = f"""📊 *نظرة عامة على السوق*
-
-📌 إجمالي الأسهم: {len(ACTIVE_TICKERS)}
-📈 استراتيجيات: فني / مضاربة
-
-🔍 للتحليل: `/تحليل [الكود]`
-مثال: `/تحليل 2222`"""
+        msg = f"📊 *نظرة عامة*\n\n📌 إجمالي الأسهم: {len(ACTIVE_TICKERS)}\n🔍 للتحليل: `/تحليل [الكود]`"
         await send_msg(session, msg, chat_id)
         return
     
     ticker = f"{ticker_code}.SR"
     if ticker not in ALL_TICKERS:
-        await send_msg(session, f"❌ الكود {ticker_code} غير موجود في القائمة.", chat_id)
+        await send_msg(session, f"❌ الكود {ticker_code} غير موجود.", chat_id)
         return
     
-    data = await fetch_daily_data(ticker)
+    # استخدام Alpha Vantage للتحليل السريع
+    data = await fetch_alpha_data(ticker)
     if not data:
-        await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code} من Yahoo.\nالسبب المحتمل: السوق مغلق، أو السهم غير مدرج بشكل صحيح.\nجرب رمزاً آخر (مثل 1211 أو 2010).", chat_id)
+        await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code} من Alpha Vantage.", chat_id)
         return
     
     analysis = await analyze_stock(ticker, data)
     
-    msg = f"""📊 *تحليل فني شامل لـ {analysis['display']}*
+    msg = f"""📊 *تحليل فني سريع لـ {analysis['display']}*
 
 💰 السعر: {analysis['price']:.2f} ريال
 📈 التغيير: +{analysis['change']:.2f}%
 📉 RSI: {analysis['rsi']:.0f}
 📊 MA20: {analysis['ma20']:.2f} | MA50: {analysis['ma50']:.2f}
-📌 الترند العام: {analysis['trend']}
+📌 الترند: {analysis['trend']}
 
-🔍 *النموذج الفني:*
-{analysis['pattern']}
+🔍 *النموذج:* {analysis['pattern']}
 
-🎯 *الأهداف المتوقعة:*
+🎯 *الأهداف:*
 1️⃣ {analysis['target1']:.2f} (+3%)
 2️⃣ {analysis['target2']:.2f} (+6%)
 3️⃣ {analysis['target3']:.2f} (+10%)
 
-🛑 *وقف الخسارة:* {analysis['stop_loss']:.2f} (تحت القاع)
+🛑 *الوقف:* {analysis['stop_loss']:.2f}
 
-📈 *التقييم العام:* {analysis['evaluation']}
-📌 القمة السابقة: {analysis['previous_high']:.2f} | القاع 30 يوم: {analysis['low_30d']:.2f}
-"""
+📈 *التقييم:* {analysis['evaluation']}"""
     await send_msg(session, msg, chat_id)
-
-# ============= تنبيهات المضاربة للقناة =============
-async def fetch_intraday_data(ticker):
-    return await fetch_daily_data(ticker)
 
 async def scalping_check(ticker, data, now):
     global alert_tracker
@@ -334,7 +334,7 @@ async def scalping_check(ticker, data, now):
 
 async def scan_market_for_scalps(session, now):
     for ticker in ACTIVE_TICKERS:
-        data = await fetch_intraday_data(ticker)
+        data = await fetch_yahoo_data(ticker)  # القناة تستخدم Yahoo
         signal = await scalping_check(ticker, data, now)
         if signal:
             msg = f"""⚡ *تنبيه مضاربة - اختراق ترند هابط*
@@ -344,22 +344,20 @@ async def scan_market_for_scalps(session, now):
 📊 RSI: {signal['rsi']:.0f} (فوق 30)
 📈 حجم: {signal['volume_ratio']:.1f}x المتوسط
 
-🎯 *الأهداف (مضاربة):*
+🎯 *الأهداف:*
 1️⃣ {signal['target1']:.2f} (+3%)
 2️⃣ {signal['target2']:.2f} (+6%)
 3️⃣ {signal['target3']:.2f} (+10%)
 
-🛑 *وقف الخسارة:* {signal['stop_loss']:.2f} (-3%)
-"""
+🛑 *الوقف:* {signal['stop_loss']:.2f} (-3%)"""
             await send_msg(session, msg)
         await asyncio.sleep(0.5)
 
-# ============= الدالة الرئيسية =============
 async def main():
     global market_open_sent, market_close_sent, current_date, daily_opportunities
     
     async with aiohttp.ClientSession() as session:
-        await send_msg(session, f"✅ *بوت التحليل والمضاربة يعمل الآن*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n🤖 أرسل `/تحليل [كود]` في الخاص للتحليل.\n📡 تنبيهات المضاربة ترسل إلى القناة.")
+        await send_msg(session, f"✅ *بوت التحليل والمضاربة (Alpha Vantage)*\n\n📊 {len(ACTIVE_TICKERS)} شركة\n⚡ التحليل الخاص سريع جداً.")
         
         last_update_id = 0
         
@@ -381,7 +379,6 @@ async def main():
                 market_close_sent = True
                 await send_msg(session, f"🔔 *إغلاق السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
             
-            # ============= معالجة الأوامر (الخاص فقط) =============
             try:
                 updates_url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
                 async with session.get(updates_url) as resp:
@@ -396,7 +393,6 @@ async def main():
                                     text = update["message"]["text"].strip()
                                     chat_id = update["message"]["chat"]["id"]
                                     
-                                    # تجاهل رسائل القناة نفسها
                                     if str(chat_id) == str(CHAT_ID):
                                         continue
                                     
@@ -408,13 +404,12 @@ async def main():
                                         else:
                                             await handle_analysis_command(session, chat_id)
                                     elif text_lower in ["/start", "قائمة"]:
-                                        await send_msg(session, "📊 *مرحباً بك في بوت التحليل*\n\nأرسل `/تحليل [الكود]` لتحليل أي سهم.\nمثال: `/تحليل 2222`", chat_id)
+                                        await send_msg(session, "📊 *مرحباً*\n\nأرسل `/تحليل [الكود]` لتحليل سريع.", chat_id)
                                     elif text_lower in ["/مساعده", "مساعده"]:
-                                        await send_msg(session, "🤖 *الأوامر المتاحة:*\n\n/تحليل [كود] - تحليل فني شامل\n/start - عرض الترحيب\n/مساعده - عرض هذا الدليل", chat_id)
+                                        await send_msg(session, "🤖 *الأوامر:*\n/تحليل [كود] - تحليل فني سريع\n/start - الترحيب\n/مساعده - الدليل", chat_id)
             except Exception as e:
                 print(f"خطأ في جلب الرسائل: {e}")
             
-            # ============= مراقبة السوق والمضاربة (للقناة) =============
             if market_open_time <= now_riyadh <= market_close_time:
                 if now_riyadh.minute % 5 == 0 and now_riyadh.second < 5:
                     await scan_market_for_scalps(session, now_riyadh)
@@ -422,5 +417,5 @@ async def main():
             await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    print(f"بدء البوت... {len(ACTIVE_TICKERS)} شركة")
+    print(f"بدء البوت... {len(ACTIVE_TICKERS)} شركة (Alpha Vantage)")
     asyncio.run(main())
