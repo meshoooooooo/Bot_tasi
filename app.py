@@ -6,7 +6,7 @@ import pytz
 import time
 import gc
 
-# ============= قراءة المتغيرات من Secrets =============
+# ============= قراءة المتغيرات =============
 TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
@@ -158,7 +158,147 @@ def get_targets(price):
 def get_trailing_stop(current_price, highest_price):
     return highest_price * (1 - TRAILING_STOP_PCT)
 
-# ============= دوال التحليل =============
+# ============= دوال التصنيفات الجديدة =============
+async def fetch_all_stocks_data():
+    """جلب بيانات جميع الأسهم مرة واحدة لاستخدامها في التصنيفات"""
+    results = []
+    for ticker in ACTIVE_TICKERS:
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("chart", {}).get("result"):
+                            result = data["chart"]["result"][0]
+                            meta = result.get("meta", {})
+                            quote = result.get("indicators", {}).get("quote", [{}])[0]
+                            
+                            current_price = meta.get("regularMarketPrice", 0)
+                            previous_close = meta.get("previousClose", current_price)
+                            current_volume = meta.get("regularMarketVolume", 0)
+                            
+                            if current_price > 0 and current_volume > 0:
+                                closes = quote.get("close", [])
+                                highs = quote.get("high", [])
+                                lows = quote.get("low", [])
+                                volumes = quote.get("volume", [])
+                                
+                                change = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
+                                avg_volume = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else current_volume
+                                volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+                                rsi = calculate_rsi(closes)
+                                ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else current_price
+                                ma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else current_price
+                                ma200 = sum(closes[-200:]) / 200 if len(closes) >= 200 else current_price
+                                high_90d = max(highs[-90:]) if len(highs) >= 90 else current_price
+                                low_30d = min(lows[-30:]) if len(lows) >= 30 else current_price
+                                
+                                results.append({
+                                    "display": get_stock_display(ticker),
+                                    "price": current_price,
+                                    "change": change,
+                                    "volume_ratio": volume_ratio,
+                                    "rsi": rsi,
+                                    "ma20": ma20,
+                                    "ma50": ma50,
+                                    "ma200": ma200,
+                                    "high_90d": high_90d,
+                                    "low_30d": low_30d,
+                                    "is_breakout_90d": current_price > high_90d,
+                                    "is_above_ma50": current_price > ma50,
+                                    "is_above_ma200": current_price > ma200
+                                })
+        except:
+            pass
+        await asyncio.sleep(0.3)  # مهلة لتجنب حظر Yahoo
+    return results
+
+async def handle_breakouts_command(session, chat_id):
+    await send_msg(session, "⏳ جاري مسح السوق... يرجى الانتظار (قد يستغرق 30 ثانية).", chat_id)
+    data = await fetch_all_stocks_data()
+    
+    # تصفية: اختراق قمة 90 يوم + زخم
+    filtered = [s for s in data if s["is_breakout_90d"] and s["change"] >= 2.0]
+    filtered.sort(key=lambda x: x["change"], reverse=True)
+    
+    if not filtered:
+        await send_msg(session, "⚠️ لا توجد أسهم اخترقت قمة 90 يوم اليوم.", chat_id)
+        return
+    
+    msg = f"📈 *أفضل 10 أسهم اخترقت قمة 90 يوم*\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, s in enumerate(filtered[:10], 1):
+        msg += f"{i}. *{s['display']}*\n   💵 {s['price']:.2f} ريال | زخم +{s['change']:.2f}%\n   📊 حجم {s['volume_ratio']:.1f}x | RSI: {s['rsi']:.0f}\n\n"
+    await send_msg(session, msg, chat_id)
+
+async def handle_ma50_command(session, chat_id):
+    await send_msg(session, "⏳ جاري مسح السوق... يرجى الانتظار (قد يستغرق 30 ثانية).", chat_id)
+    data = await fetch_all_stocks_data()
+    
+    # تصفية: فوق المتوسط 50 + زخم
+    filtered = [s for s in data if s["is_above_ma50"] and s["change"] >= 1.5]
+    filtered.sort(key=lambda x: x["change"], reverse=True)
+    
+    if not filtered:
+        await send_msg(session, "⚠️ لا توجد أسهم فوق المتوسط 50 بزخم حالياً.", chat_id)
+        return
+    
+    msg = f"📈 *أفضل 10 أسهم فوق المتوسط 50*\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, s in enumerate(filtered[:10], 1):
+        msg += f"{i}. *{s['display']}*\n   💵 {s['price']:.2f} ريال | زخم +{s['change']:.2f}%\n   📊 RSI: {s['rsi']:.0f} | الحجم: {s['volume_ratio']:.1f}x\n\n"
+    await send_msg(session, msg, chat_id)
+
+async def handle_reversal_up_command(session, chat_id):
+    await send_msg(session, "⏳ جاري مسح السوق... يرجى الانتظار (قد يستغرق 30 ثانية).", chat_id)
+    data = await fetch_all_stocks_data()
+    
+    # تصفية: انعكاس صاعد (قاع + صعود بحجم)
+    filtered = [s for s in data if s["price"] <= (s["low_30d"] * 1.05) and s["change"] >= 2.5 and s["volume_ratio"] >= 1.8 and s["rsi"] < 50]
+    filtered.sort(key=lambda x: x["change"], reverse=True)
+    
+    if not filtered:
+        await send_msg(session, "⚠️ لا توجد أسهم بانعكاس صاعد واضح اليوم.", chat_id)
+        return
+    
+    msg = f"🎣 *أفضل 5 فرص انعكاس صاعد (قاع)*\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, s in enumerate(filtered[:5], 1):
+        msg += f"{i}. *{s['display']}*\n   💵 {s['price']:.2f} ريال | صعود +{s['change']:.2f}%\n   📊 حجم {s['volume_ratio']:.1f}x | RSI: {s['rsi']:.0f}\n   🛑 وقف: {s['low_30d']*0.97:.2f}\n\n"
+    await send_msg(session, msg, chat_id)
+
+async def handle_ma200_command(session, chat_id):
+    await send_msg(session, "⏳ جاري مسح السوق... يرجى الانتظار (قد يستغرق 30 ثانية).", chat_id)
+    data = await fetch_all_stocks_data()
+    
+    filtered = [s for s in data if s["is_above_ma200"] and s["change"] >= 1.0]
+    filtered.sort(key=lambda x: x["change"], reverse=True)
+    
+    if not filtered:
+        await send_msg(session, "⚠️ لا توجد أسهم فوق المتوسط 200 بزخم حالياً.", chat_id)
+        return
+    
+    msg = f"📈 *أفضل 10 أسهم فوق المتوسط 200*\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, s in enumerate(filtered[:10], 1):
+        msg += f"{i}. *{s['display']}*\n   💵 {s['price']:.2f} ريال | زخم +{s['change']:.2f}%\n   📊 RSI: {s['rsi']:.0f}\n\n"
+    await send_msg(session, msg, chat_id)
+
+async def handle_volume_command(session, chat_id):
+    await send_msg(session, "⏳ جاري مسح السوق... يرجى الانتظار (قد يستغرق 30 ثانية).", chat_id)
+    data = await fetch_all_stocks_data()
+    
+    filtered = [s for s in data if s["volume_ratio"] >= 3.0 and s["change"] >= 1.0]
+    filtered.sort(key=lambda x: x["volume_ratio"], reverse=True)
+    
+    if not filtered:
+        await send_msg(session, "⚠️ لا توجد أسهم بحجم استثنائي حالياً.", chat_id)
+        return
+    
+    msg = f"🔥 *أفضل 5 أسهم بحجم استثنائي (3x المتوسط)*\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, s in enumerate(filtered[:5], 1):
+        msg += f"{i}. *{s['display']}*\n   💵 {s['price']:.2f} ريال | زخم +{s['change']:.2f}%\n   📊 الحجم: {s['volume_ratio']:.1f}x المتوسط\n\n"
+    await send_msg(session, msg, chat_id)
+
+# ============= دوال التحليل الأساسية =============
 async def handle_analysis_command(session, chat_id, ticker_code=None):
     if ticker_code:
         ticker = f"{ticker_code}.SR"
@@ -227,39 +367,26 @@ async def handle_analysis_command(session, chat_id, ticker_code=None):
 🔍 *لتحليل سهم محدد:* أرسل `/تحليل [الكود]`
 مثال: `/تحليل 2222` (لأرامكو)
 
-📌 *لعرض فرص الانعكاس:* أرسل `/انعكاسات`
-"""
+📌 *لأوامر التصنيفات:* أرسل `/مساعده`"""
         await send_msg(session, msg, chat_id)
-
-async def handle_reversals_command(session, chat_id):
-    if not daily_reversals:
-        await send_msg(session, "⚠️ لا توجد فرص انعكاسية مسجلة حالياً. سيتم التحديث يومياً بعد إغلاق السوق.", chat_id)
-        return
-    
-    msg = f"🎣 *آخر 5 فرص صيد انعكاس صاعد*\n📅 آخر تحديث: {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
-    for i, opp in enumerate(daily_reversals[-5:], 1):
-        msg += f"{i}. *{opp['display_name']}*\n"
-        msg += f"   💵 السعر: {opp['price']:.2f} ريال | صعود: +{opp['change']:.2f}%\n"
-        msg += f"   📊 حجم: {opp['volume_ratio']:.1f}x | RSI: {opp['rsi']:.0f}\n"
-        msg += f"   🎯 أهداف (10% / 20% / 30%): {opp['target1']:.2f} / {opp['target2']:.2f} / {opp['target3']:.2f}\n"
-        msg += f"   🛑 وقف صارم: {opp['stop_loss']:.2f}\n\n"
-    await send_msg(session, msg, chat_id)
 
 async def handle_help_command(session, chat_id):
     msg = f"""🤖 *أوامر البوت المتاحة:*
 
+📊 *التحليل:*
 /تحليل [كود] - تحليل سهم بـ 3 استراتيجيات
-مثال: `/تحليل 2222` (لأرامكو)
-
 /تحليل - عرض نظرة عامة على السوق
 
-/انعكاسات - عرض آخر 5 فرص انعكاس صاعد
+📈 *التصنيفات (مسح السوق):*
+/اختراقات - أفضل 10 أسهم اخترقت قمة 90 يوم
+/متوسط50 - أفضل 10 أسهم فوق المتوسط 50
+/متوسط200 - أفضل 10 أسهم فوق المتوسط 200
+/انعكاسات - أفضل 5 فرص انعكاس صاعد (قاع)
+/حجم - أفضل 5 أسهم بحجم استثنائي
 
+📌 *أخرى:*
 /استراتيجيات - شرح الاستراتيجيات المستخدمة
-
-/مساعده - عرض هذه القائمة
-
-📌 *ملاحظة:* يمكنك كتابة الأوامر بدون "/" أيضاً."""
+/مساعده - عرض هذه القائمة"""
     await send_msg(session, msg, chat_id)
 
 async def handle_strategy_command(session, chat_id):
@@ -268,17 +395,14 @@ async def handle_strategy_command(session, chat_id):
 1️⃣ *استراتيجية اختراق القمة (Breakout)*
    • البحث عن أسهم تخترق أعلى سعر لها خلال 90 يوم.
    • مع زخم +{MIN_MOMENTUM}% وحجم عالٍ.
-   • أهداف: {TARGET_1_PCT*100:.0f}% / {TARGET_2_PCT*100:.0f}% / {TARGET_3_PCT*100:.0f}%
 
 2️⃣ *استراتيجية صيد الانعكاس القاعي (Reversal)*
    • البحث عن أسهم عند قاع 30 يوم.
    • مع حجم غير طبيعي (+80%) وصعود +2% في اليوم.
-   • أهداف: 10% / 20% / 30% خلال شهر.
 
-3️⃣ *استراتيجية القوة العامة*
-   • تحليل الزخم العام للسهم بناءً على RSI والحجم.
-
-📌 يتم تحديث قائمة الانعكاسات يومياً بعد إغلاق السوق."""
+3️⃣ *استراتيجية المتوسطات المتحركة*
+   • تصنيف الأسهم فوق المتوسط 50 و 200.
+   • تحديد الاتجاه العام للسوق."""
     await send_msg(session, msg, chat_id)
 
 # ============= دوال جلب البيانات =============
@@ -317,51 +441,6 @@ async def fetch_full_data(ticker):
                 
                 is_breakout = current_price > previous_high
                 return {"ticker": ticker, "price": current_price, "change": change, "volume": current_volume, "volume_ratio": volume_ratio, "rsi": rsi, "previous_high": previous_high, "low_30d": low_30d, "ma20": ma20, "is_breakout": is_breakout}
-    except:
-        return None
-
-async def fetch_reversal_data(ticker):
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                if not data.get("chart", {}).get("result"):
-                    return None
-                result = data["chart"]["result"][0]
-                meta = result.get("meta", {})
-                quote = result.get("indicators", {}).get("quote", [{}])[0]
-                
-                current_price = meta.get("regularMarketPrice", 0)
-                previous_close = meta.get("previousClose", current_price)
-                current_volume = meta.get("regularMarketVolume", 0)
-                
-                if current_price <= 0 or current_volume <= 0:
-                    return None
-                closes = quote.get("close", [])
-                highs = quote.get("high", [])
-                lows = quote.get("low", [])
-                volumes = quote.get("volume", [])
-
-                change = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
-                avg_volume = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else current_volume
-                volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-                rsi = calculate_rsi(closes)
-                low_30d = min(lows[-30:]) if len(lows) >= 30 else current_price
-                high_20d = max(highs[-20:]) if len(highs) >= 20 else current_price
-
-                is_near_low = current_price <= (low_30d * 1.05)
-                is_big_volume = volume_ratio >= 1.8
-                is_good_momentum = change >= 2.0
-                is_oversold = rsi < 45
-                is_reversal_candle = current_price > previous_close and current_price > (high_20d * 0.95)
-
-                if is_near_low and is_big_volume and is_good_momentum and is_oversold and is_reversal_candle:
-                    return {"ticker": ticker, "price": current_price, "change": change, "volume": current_volume, "volume_ratio": volume_ratio, "rsi": rsi, "low_30d": low_30d}
-                return None
     except:
         return None
 
@@ -449,37 +528,6 @@ async def check_and_update_followups(session, now_riyadh):
     for ticker in to_remove:
         del stock_followup[ticker]
 
-async def scan_daily_reversals(session):
-    global daily_reversals
-    daily_reversals = []
-    for ticker in ACTIVE_TICKERS:
-        data = await fetch_reversal_data(ticker)
-        if data:
-            display_name = get_stock_display(ticker)
-            price = data["price"]
-            change = data["change"]
-            volume_ratio = data["volume_ratio"]
-            rsi = data["rsi"]
-            low_30d = data["low_30d"]
-            
-            daily_reversals.append({
-                'display_name': display_name,
-                'price': price,
-                'change': change,
-                'volume_ratio': volume_ratio,
-                'rsi': rsi,
-                'target1': price * 1.10,
-                'target2': price * 1.20,
-                'target3': price * 1.30,
-                'stop_loss': low_30d * 0.97
-            })
-        await asyncio.sleep(0.5)
-    
-    if daily_reversals:
-        await send_msg(session, f"📊 *تم تحديث قائمة الانعكاسات اليومية*\n✅ عدد الفرص: {len(daily_reversals)}\nأرسل `/انعكاسات` لعرضها.")
-    else:
-        await send_msg(session, "📊 *تم تحديث قائمة الانعكاسات*\n⚠️ لم يتم رصد أي فرص اليوم.")
-
 async def send_daily_summary(session):
     global daily_opportunities
     if not daily_opportunities:
@@ -495,12 +543,10 @@ async def send_daily_summary(session):
     daily_opportunities = []
 
 # ============= الدالة الرئيسية =============
-# ============= الدالة الرئيسية (تم إصلاحها بالكامل) =============
 async def main():
     global market_open_sent, market_close_sent, current_date, daily_opportunities
     
     async with aiohttp.ClientSession() as session:
-        # تم إصلاح علامة التنصيص المفقودة هنا 👇
         await send_msg(session, f"✅ *البوت يعمل الان جاري المتابعة*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📈 استراتيجية اختراق آخر قمة\n🎯 أهداف: {TARGET_1_PCT*100:.0f}% / {TARGET_2_PCT*100:.0f}% / {TARGET_3_PCT*100:.0f}%\n🛡️ وقف متحرك: {TRAILING_STOP_PCT*100:.0f}%\n\n🤖 أرسل `/مساعده` لمعرفة الأوامر المتاحة.")
         
         last_update_id = 0
@@ -524,7 +570,6 @@ async def main():
                 market_close_sent = True
                 await send_msg(session, f"🔔 *إغلاق السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}\n📊 جاري الملخص...")
                 await send_daily_summary(session)
-                await scan_daily_reversals(session)
             
             # ============= معالجة الأوامر =============
             try:
@@ -554,8 +599,20 @@ async def main():
                                         else:
                                             await handle_analysis_command(session, chat_id)
                                     
+                                    elif text_lower.startswith("/اختراقات") or text_lower == "اختراقات":
+                                        await handle_breakouts_command(session, chat_id)
+                                    
+                                    elif text_lower.startswith("/متوسط50") or text_lower == "متوسط50":
+                                        await handle_ma50_command(session, chat_id)
+                                    
                                     elif text_lower.startswith("/انعكاسات") or text_lower == "انعكاسات":
-                                        await handle_reversals_command(session, chat_id)
+                                        await handle_reversal_up_command(session, chat_id)
+                                    
+                                    elif text_lower.startswith("/متوسط200") or text_lower == "متوسط200":
+                                        await handle_ma200_command(session, chat_id)
+                                    
+                                    elif text_lower.startswith("/حجم") or text_lower == "حجم":
+                                        await handle_volume_command(session, chat_id)
                                     
                                     elif text_lower.startswith("/استراتيجيات") or text_lower == "استراتيجيات":
                                         await handle_strategy_command(session, chat_id)
