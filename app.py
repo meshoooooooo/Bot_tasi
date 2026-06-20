@@ -495,9 +495,109 @@ async def send_daily_summary(session):
     daily_opportunities = []
 
 # ============= الدالة الرئيسية =============
+# ============= الدالة الرئيسية (تم إصلاحها بالكامل) =============
 async def main():
     global market_open_sent, market_close_sent, current_date, daily_opportunities
     
     async with aiohttp.ClientSession() as session:
-        # الرسالة الترحيبية
-        await send_msg(session, f"✅ *البوت يعمل الان جاري المتابعة*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📈 استراتيجية اختراق آخر قمة\n🎯 أهداف: {TARGET_1_P
+        # تم إصلاح علامة التنصيص المفقودة هنا 👇
+        await send_msg(session, f"✅ *البوت يعمل الان جاري المتابعة*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📈 استراتيجية اختراق آخر قمة\n🎯 أهداف: {TARGET_1_PCT*100:.0f}% / {TARGET_2_PCT*100:.0f}% / {TARGET_3_PCT*100:.0f}%\n🛡️ وقف متحرك: {TRAILING_STOP_PCT*100:.0f}%\n\n🤖 أرسل `/مساعده` لمعرفة الأوامر المتاحة.")
+        
+        last_update_id = 0
+        
+        while True:
+            now_riyadh = datetime.now(RIYADH_TZ)
+            market_open_time = now_riyadh.replace(hour=10, minute=0, second=0)
+            market_close_time = now_riyadh.replace(hour=15, minute=0, second=0)
+            
+            if current_date != now_riyadh.date():
+                current_date = now_riyadh.date()
+                market_open_sent = False
+                market_close_sent = False
+                daily_opportunities = []
+            
+            if not market_open_sent and now_riyadh >= market_open_time and now_riyadh < market_close_time:
+                market_open_sent = True
+                await send_msg(session, f"🔔 *فتح السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
+            
+            if not market_close_sent and now_riyadh >= market_close_time:
+                market_close_sent = True
+                await send_msg(session, f"🔔 *إغلاق السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}\n📊 جاري الملخص...")
+                await send_daily_summary(session)
+                await scan_daily_reversals(session)
+            
+            # ============= معالجة الأوامر =============
+            try:
+                updates_url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
+                async with session.get(updates_url) as resp:
+                    if resp.status == 200:
+                        updates_data = await resp.json()
+                        if updates_data.get("ok"):
+                            result = updates_data.get("result", [])
+                            for update in result:
+                                if update["update_id"] >= last_update_id:
+                                    last_update_id = update["update_id"] + 1
+                                
+                                if "message" in update and "text" in update["message"]:
+                                    text = update["message"]["text"].strip()
+                                    chat_id = update["message"]["chat"]["id"]
+                                    
+                                    if str(chat_id) == str(CHAT_ID):
+                                        continue
+                                    
+                                    text_lower = text.lower()
+                                    
+                                    if text_lower.startswith("/تحليل") or text_lower.startswith("تحليل"):
+                                        parts = text.split()
+                                        if len(parts) > 1 and parts[1].isdigit():
+                                            await handle_analysis_command(session, chat_id, parts[1])
+                                        else:
+                                            await handle_analysis_command(session, chat_id)
+                                    
+                                    elif text_lower.startswith("/انعكاسات") or text_lower == "انعكاسات":
+                                        await handle_reversals_command(session, chat_id)
+                                    
+                                    elif text_lower.startswith("/استراتيجيات") or text_lower == "استراتيجيات":
+                                        await handle_strategy_command(session, chat_id)
+                                    
+                                    elif text_lower.startswith("/مساعده") or text_lower == "مساعده":
+                                        await handle_help_command(session, chat_id)
+            except Exception as e:
+                print(f"خطأ في جلب الرسائل: {e}")
+            
+            # ============= مراقبة السوق =============
+            if market_open_time <= now_riyadh <= market_close_time:
+                await check_and_update_followups(session, now_riyadh)
+                for i, ticker in enumerate(ACTIVE_TICKERS):
+                    data = await fetch_ticker_data(ticker)
+                    if data:
+                        display_name = get_stock_display(ticker)
+                        price = data["price"]
+                        change = data["change"]
+                        volume = data["volume"]
+                        volume_ratio = data["volume_ratio"]
+                        rsi = data["rsi"]
+                        strength = data["strength"]
+                        previous_high = data["previous_high"]
+                        alert_counters[display_name] = alert_counters.get(display_name, 0) + 1
+                        target1, target2, target3 = get_targets(price)
+                        trailing_stop = get_trailing_stop(price, price)
+                        daily_opportunities.append({'display_name': display_name, 'price': price, 'change': change, 'volume_ratio': volume_ratio, 'strength': strength, 'target1': target1, 'target2': target2, 'target3': target3, 'stop_loss': trailing_stop, 'rsi': rsi})
+                        last_alert = tracker.get(display_name, 0)
+                        if time.time() - last_alert > 21600:
+                            tracker[display_name] = time.time()
+                            if display_name not in stock_followup:
+                                stock_followup[display_name] = {"entry_price": price, "highest_price": price, "target1_hit": False, "target2_hit": False, "target3_hit": False, "stop_loss": trailing_stop}
+                            s_text = "💥 قوي جداً" if strength >= 75 else "🚀 قوي" if strength >= 60 else "📈 متوسط"
+                            msg = (f"🚀 *اختراق آخر قمة*\n\n📌 *{display_name}* | #{alert_counters[display_name]}\n💰 {price:.2f} ريال | زخم +{change:.2f}%\n📊 حجم {volume_ratio:.1f}x | سيولة {volume:,}\n📈 RSI: {rsi:.0f} | قوة: {s_text} ({strength:.0f})\n📊 القمة السابقة: {previous_high:.2f}\n\n🎯 الأهداف:\n1️⃣ {target1:.2f} (+{TARGET_1_PCT*100:.0f}%)\n2️⃣ {target2:.2f} (+{TARGET_2_PCT*100:.0f}%)\n3️⃣ {target3:.2f} (+{TARGET_3_PCT*100:.0f}%)\n🛑 وقف متحرك: {trailing_stop:.2f} (-{TRAILING_STOP_PCT*100:.0f}%)")
+                            await send_msg(session, msg)
+                    if (i + 1) % 20 == 0:
+                        gc.collect()
+                        await asyncio.sleep(0.5)
+                gc.collect()
+            
+            await asyncio.sleep(60)
+
+if __name__ == "__main__":
+    print(f"بدء البوت... {len(ACTIVE_TICKERS)} شركة")
+    asyncio.run(main())
