@@ -80,9 +80,8 @@ alert_counters = {}
 tracker = {}
 stock_followup = {}
 daily_opportunities = []
-daily_reversals = []  # قائمة جديدة لتخزين فرص الانعكاس الصاعد
+daily_reversals = []
 
-# ============= إعدادات الاستراتيجيات =============
 MIN_PRICE = 1.0
 MAX_PRICE = 150.0
 MIN_VOLUME = 1000000
@@ -101,7 +100,6 @@ market_open_sent = False
 market_close_sent = False
 current_date = None
 
-# ============= الدوال المساعدة =============
 def get_stock_display(ticker):
     code = ticker.replace(".SR", "")
     name = STOCK_NAMES.get(code, code)
@@ -160,7 +158,6 @@ def get_targets(price):
 def get_trailing_stop(current_price, highest_price):
     return highest_price * (1 - TRAILING_STOP_PCT)
 
-# ============= دوال التحليل (الاستراتيجيات المتعددة) =============
 async def handle_analysis_command(session, chat_id, ticker_code=None):
     if ticker_code:
         ticker = f"{ticker_code}.SR"
@@ -186,16 +183,13 @@ async def handle_analysis_command(session, chat_id, ticker_code=None):
         target1, target2, target3 = get_targets(price)
         trailing_stop = get_trailing_stop(price, price)
         
-        # استراتيجية 1: اختراق القمة الحالية
         s1_status = "✅ متاحة" if data["is_breakout"] else "❌ غير متاحة"
         s1_targets = f"{target1:.2f} / {target2:.2f} / {target3:.2f}"
         
-        # استراتيجية 2: انعكاس القاع (الصيد)
         is_reversal = (price <= low_30d * 1.05 and change >= 2.0 and volume_ratio >= 1.8 and rsi < 45)
         s2_status = "✅ فرصة صيد" if is_reversal else "❌ غير متاحة"
         s2_targets = f"{price*1.10:.2f} / {price*1.20:.2f} / {price*1.30:.2f}"
         
-        # استراتيجية 3: القوة العامة
         s3_status = "💪 قوي" if change >= 2.0 and rsi >= 50 else "📉 ضعيف"
         
         msg = f"""📊 *تحليل شامل لـ {display}*
@@ -286,7 +280,6 @@ async def handle_strategy_command(session, chat_id):
 📌 يتم تحديث قائمة الانعكاسات يومياً بعد إغلاق السوق."""
     await send_msg(session, msg, chat_id)
 
-# ============= دوال جلب البيانات =============
 async def fetch_full_data(ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -326,7 +319,6 @@ async def fetch_full_data(ticker):
         return None
 
 async def fetch_reversal_data(ticker):
-    """تبحث عن انعكاسات قاع (سعر منخفض + حجم كبير + انعكاس شمعة)"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -366,14 +358,10 @@ async def fetch_reversal_data(ticker):
                 is_reversal_candle = current_price > previous_close and current_price > (high_20d * 0.95)
 
                 if is_near_low and is_big_volume and is_good_momentum and is_oversold and is_reversal_candle:
-                    strength = calculate_strength_score(change, volume_ratio, rsi, True, False, True)
-                    return {"ticker": ticker, "price": current_price, "change": change, "volume": current_volume, "volume_ratio": volume_ratio, "rsi": rsi, "strength": strength, "low_30d": low_30d}
+                    return {"ticker": ticker, "price": current_price, "change": change, "volume": current_volume, "volume_ratio": volume_ratio, "rsi": rsi, "low_30d": low_30d}
                 return None
     except:
         return None
-
-async def fetch_breakout_data(ticker):
-    return await fetch_ticker_data(ticker)  # إعادة استخدام الدالة الأصلية
 
 async def fetch_ticker_data(ticker):
     try:
@@ -397,7 +385,6 @@ async def fetch_ticker_data(ticker):
                 volumes = quote.get("volume", [])
                 closes = quote.get("close", [])
                 highs = quote.get("high", [])
-                prev_volume = volumes[-2] if len(volumes) >= 2 and volumes[-2] else current_volume
                 change = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
                 avg_volume = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else current_volume
                 volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
@@ -423,7 +410,6 @@ async def fetch_ticker_data(ticker):
     except:
         return None
 
-# ============= دوال المتابعة والملخص =============
 async def check_and_update_followups(session, now_riyadh):
     global stock_followup
     to_remove = []
@@ -499,4 +485,15 @@ async def send_daily_summary(session):
         return
     daily_opportunities.sort(key=lambda x: x['strength'], reverse=True)
     top_10 = daily_opportunities[:10]
-    msg = f"📊 *ملخص نهاية اليوم - أفضل {len(top_10)} فرصة*\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d')}\n━━━━━━━━━━━━━━
+    msg = f"📊 *ملخص نهاية اليوم - أفضل {len(top_10)} فرصة*\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, opp in enumerate(top_10, 1):
+        icon = "💥" if opp['strength'] >= 75 else "🚀" if opp['strength'] >= 60 else "📈"
+        msg += f"{i}. {icon} *{opp['display_name']}* | قوة: {opp['strength']}/100\n   💵 {opp['price']:.2f} | زخم +{opp['change']:.2f}%\n   📊 حجم {opp['volume_ratio']:.1f}x | RSI: {opp['rsi']:.0f}\n   🎯 أهداف: {opp['target1']:.2f} / {opp['target2']:.2f} / {opp['target3']:.2f}\n   🛑 وقف: {opp['stop_loss']:.2f}\n\n"
+    await send_msg(session, msg)
+    daily_opportunities = []
+
+async def main():
+    global market_open_sent, market_close_sent, current_date, daily_opportunities
+    
+    async with aiohttp.ClientSession() as session:
+        await send_msg(session, f"✅ *البوت يعمل الان جاري المتابعة*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📈 استراتيجية اختراق آخر قمة\n
