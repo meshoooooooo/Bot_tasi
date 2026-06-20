@@ -196,7 +196,6 @@ async def analyze_stock(ticker, data):
     # النماذج الفنية
     pattern = "لا يوجد نموذج واضح"
     if len(lows) >= 60:
-        # كشف بسيط للدبل بوتوم (قاعان متساويان مع قمة بينهما)
         low1 = min(lows[-60:-30])
         low2 = min(lows[-30:])
         if abs(low1 - low2) / low1 < 0.02 and low2 >= low1 and price > max(lows[-60:]):
@@ -280,7 +279,6 @@ async def handle_analysis_command(session, chat_id, ticker_code=None):
 
 # ============= تنبيهات المضاربة للقناة =============
 async def fetch_intraday_data(ticker):
-    # نستخدم بيانات اليوم نفسها، لكننا نحتاج لسياق السعر الحالي فقط
     return await fetch_daily_data(ticker)
 
 async def scalping_check(ticker, data, now):
@@ -297,21 +295,16 @@ async def scalping_check(ticker, data, now):
     if len(closes) < 20:
         return None
     
-    # حساب المؤشرات
     rsi = calculate_rsi(closes, RSI_PERIOD)
     avg_volume = sum(volumes[-20:]) / 20
     volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 0
     
-    # الترند الهابط البسيط (آخر 5 شموع)
     recent_highs = highs[-5:]
-    recent_lows = lows[-5:]
     if len(recent_highs) < 5:
         return None
     
-    # كشف الترند الهابط (قمة أقل من سابقتها)
     is_downtrend = all(recent_highs[i] < recent_highs[i-1] for i in range(1, 5))
     
-    # شروط الاختراق
     breakout = (
         is_downtrend and
         price > recent_highs[-1] and
@@ -379,17 +372,15 @@ async def main():
                 market_open_sent = False
                 market_close_sent = False
             
-            # فتح السوق
             if not market_open_sent and now_riyadh >= market_open_time and now_riyadh < market_close_time:
                 market_open_sent = True
                 await send_msg(session, f"🔔 *فتح السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
             
-            # إغلاق السوق
             if not market_close_sent and now_riyadh >= market_close_time:
                 market_close_sent = True
                 await send_msg(session, f"🔔 *إغلاق السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
             
-            # معالجة الأوامر (الخاص فقط)
+            # ============= معالجة الأوامر (الخاص فقط) =============
             try:
                 updates_url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
                 async with session.get(updates_url) as resp:
@@ -403,8 +394,6 @@ async def main():
                                 if "message" in update and "text" in update["message"]:
                                     text = update["message"]["text"].strip()
                                     chat_id = update["message"]["chat"]["id"]
-                                    if str(chat_id) == str(CHAT_ID):
-                                        continue  # تجاهل القناة
                                     text_lower = text.lower()
                                     if text_lower.startswith("/تحليل") or text_lower.startswith("تحليل"):
                                         parts = text.split()
@@ -419,9 +408,8 @@ async def main():
             except Exception as e:
                 print(f"خطأ في جلب الرسائل: {e}")
             
-            # مراقبة السوق والمضاربة (للقناة)
+            # ============= مراقبة السوق والمضاربة (للقناة) =============
             if market_open_time <= now_riyadh <= market_close_time:
-                # تنبيهات المضاربة كل 5 دقائق
                 if now_riyadh.minute % 5 == 0 and now_riyadh.second < 5:
                     await scan_market_for_scalps(session, now_riyadh)
             
