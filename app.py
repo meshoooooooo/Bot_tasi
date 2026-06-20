@@ -77,7 +77,6 @@ market_open_sent = False
 market_close_sent = False
 current_date = None
 alert_tracker = {}
-stock_followup = {}
 daily_opportunities = []
 
 RSI_PERIOD = 14
@@ -127,12 +126,12 @@ def calculate_rsi(closes, period=14):
 def get_targets(price):
     return (price * 1.03, price * 1.06, price * 1.10)
 
-async def fetch_yahoo_data(ticker):
+async def fetch_data(ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, headers=headers) as resp:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
                     return None
                 data = await resp.json()
@@ -147,20 +146,18 @@ async def fetch_yahoo_data(ticker):
                 closes = quote.get("close", [])
                 highs = quote.get("high", [])
                 lows = quote.get("low", [])
-                volumes = quote.get("volume", [])
                 if not closes or not highs or not lows:
                     return None
                 return {
                     "price": price,
                     "closes": closes,
                     "highs": highs,
-                    "lows": lows,
-                    "volumes": volumes
+                    "lows": lows
                 }
     except:
         return None
 
-async def analyze_stock(ticker, data):
+async def analyze_stock(ticker, code, data):
     closes = data["closes"]
     highs = data["highs"]
     lows = data["lows"]
@@ -171,77 +168,72 @@ async def analyze_stock(ticker, data):
     ma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else price
     high_90d = max(highs[-90:]) if len(highs) >= 90 else price
     low_30d = min(lows[-30:]) if len(lows) >= 30 else price
-    previous_high = max(highs[-PREVIOUS_HIGH_LOOKBACK:]) if len(highs) >= PREVIOUS_HIGH_LOOKBACK else price
+    prev_high = max(highs[-PREVIOUS_HIGH_LOOKBACK:]) if len(highs) >= PREVIOUS_HIGH_LOOKBACK else price
     
     trend = "صاعد" if price > ma50 else "هابط"
-    pattern = "لا يوجد نموذج واضح"
-    if len(lows) >= 60:
+    
+    # الكشف عن النموذج الفني
+    pattern = "لا يوجد نموذج واضح حالياً"
+    if price > prev_high:
+        pattern = "اختراق قمة سابقة (إيجابي)"
+    elif len(lows) >= 60:
         low1 = min(lows[-60:-30])
         low2 = min(lows[-30:])
         if abs(low1 - low2) / low1 < 0.02 and low2 >= low1 and price > max(lows[-60:]):
             pattern = "نموذج قاع مزدوج (Double Bottom) - إيجابي"
     
-    is_breakout = price > previous_high
+    is_breakout = price > prev_high
     evaluation = "إيجابي 🟢" if (price > ma50 and rsi > 50 and is_breakout) else "سلبي 🔴" if (price < ma50 and rsi < 50) else "محايد 🟡"
     
     t1, t2, t3 = get_targets(price)
-    stop_loss = low_30d * 0.97
+    stop = low_30d * 0.97 if low_30d > 0 else price * 0.95
     
     return {
-        "display": get_stock_display(ticker),
         "price": price,
-        "change": ((price - closes[-2]) / closes[-2]) * 100 if len(closes) >= 2 else 0,
         "rsi": rsi,
         "ma20": ma20,
         "ma50": ma50,
         "trend": trend,
         "pattern": pattern,
-        "is_breakout": is_breakout,
         "evaluation": evaluation,
-        "target1": t1,
-        "target2": t2,
-        "target3": t3,
-        "stop_loss": stop_loss,
-        "previous_high": previous_high,
-        "low_30d": low_30d
+        "t1": t1,
+        "t2": t2,
+        "t3": t3,
+        "stop": stop
     }
 
-async def handle_analysis_command(session, chat_id, ticker_code=None):
-    if not ticker_code:
-        msg = f"📊 *نظرة عامة*\n\n📌 إجمالي الأسهم: {len(ACTIVE_TICKERS)}\n🔍 للتحليل: اكتب الرمز (مثلاً 2222)"
-        await send_msg(session, msg, chat_id)
-        return
-    
-    ticker = f"{ticker_code}.SR"
+async def handle_analysis_command(session, chat_id, code):
+    ticker = f"{code}.SR"
     if ticker not in ALL_TICKERS:
-        await send_msg(session, f"❌ الكود {ticker_code} غير موجود.", chat_id)
+        await send_msg(session, f"❌ الكود {code} غير موجود.", chat_id)
         return
     
-    data = await fetch_yahoo_data(ticker)
+    data = await fetch_data(ticker)
     if not data:
-        await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code}.", chat_id)
+        await send_msg(session, f"❌ تعذر جلب بيانات {code}.", chat_id)
         return
     
-    analysis = await analyze_stock(ticker, data)
+    analysis = await analyze_stock(ticker, code, data)
+    display = get_stock_display(ticker)
     
-    msg = f"""📊 *تحليل فني لـ {analysis['display']}*
+    msg = f"""📊 *تحليل فني كامل لـ {display}*
 
 💰 السعر: {analysis['price']:.2f} ريال
-📈 التغيير: +{analysis['change']:.2f}%
 📉 RSI: {analysis['rsi']:.0f}
 📊 MA20: {analysis['ma20']:.2f} | MA50: {analysis['ma50']:.2f}
 📌 الترند: {analysis['trend']}
 
-🔍 *النموذج:* {analysis['pattern']}
+🔍 *النموذج الفني المكتشف:*
+{analysis['pattern']}
 
-🎯 *الأهداف:*
-1️⃣ {analysis['target1']:.2f} (+3%)
-2️⃣ {analysis['target2']:.2f} (+6%)
-3️⃣ {analysis['target3']:.2f} (+10%)
+🎯 *الأهداف المتوقعة:*
+1️⃣ {analysis['t1']:.2f} (+3%)
+2️⃣ {analysis['t2']:.2f} (+6%)
+3️⃣ {analysis['t3']:.2f} (+10%)
 
-🛑 *الوقف:* {analysis['stop_loss']:.2f}
+🛑 *وقف الخسارة:* {analysis['stop']:.2f}
 
-📈 *التقييم:* {analysis['evaluation']}"""
+📈 *التقييم العام:* {analysis['evaluation']}"""
     await send_msg(session, msg, chat_id)
 
 async def scalping_check(ticker, data, now):
@@ -252,16 +244,12 @@ async def scalping_check(ticker, data, now):
     closes = data["closes"]
     highs = data["highs"]
     lows = data["lows"]
-    volumes = data["volumes"]
     price = data["price"]
     
     if len(closes) < 20:
         return None
     
     rsi = calculate_rsi(closes, RSI_PERIOD)
-    avg_volume = sum(volumes[-20:]) / 20
-    volume_ratio = volumes[-1] / avg_volume if avg_volume > 0 else 0
-    
     recent_highs = highs[-5:]
     if len(recent_highs) < 5:
         return None
@@ -271,7 +259,6 @@ async def scalping_check(ticker, data, now):
     breakout = (
         is_downtrend and
         price > recent_highs[-1] and
-        volume_ratio >= SCALP_MIN_VOLUME_RATIO and
         rsi > SCALP_MIN_RSI
     )
     
@@ -281,37 +268,35 @@ async def scalping_check(ticker, data, now):
         if time.time() - last_alert > SCALP_COOLDOWN:
             alert_tracker[display] = time.time()
             t1, t2, t3 = get_targets(price)
-            stop_loss = price * 0.97
+            stop = price * 0.97
             return {
                 "display": display,
                 "price": price,
                 "rsi": rsi,
-                "volume_ratio": volume_ratio,
-                "target1": t1,
-                "target2": t2,
-                "target3": t3,
-                "stop_loss": stop_loss
+                "t1": t1,
+                "t2": t2,
+                "t3": t3,
+                "stop": stop
             }
     return None
 
 async def scan_market_for_scalps(session, now):
     for ticker in ACTIVE_TICKERS:
-        data = await fetch_yahoo_data(ticker)
+        data = await fetch_data(ticker)
         signal = await scalping_check(ticker, data, now)
         if signal:
-            msg = f"""⚡ *تنبيه مضاربة - اختراق ترند هابط*
+            msg = f"""⚡ *تنبيه مضاربة فورية*
 
 📌 *{signal['display']}*
 💰 السعر: {signal['price']:.2f} ريال
-📊 RSI: {signal['rsi']:.0f} (فوق 30)
-📈 حجم: {signal['volume_ratio']:.1f}x المتوسط
+📊 RSI: {signal['rsi']:.0f}
 
-🎯 *الأهداف:*
-1️⃣ {signal['target1']:.2f} (+3%)
-2️⃣ {signal['target2']:.2f} (+6%)
-3️⃣ {signal['target3']:.2f} (+10%)
+🎯 *أهداف سريعة:*
+1️⃣ {signal['t1']:.2f} (+3%)
+2️⃣ {signal['t2']:.2f} (+6%)
+3️⃣ {signal['t3']:.2f} (+10%)
 
-🛑 *الوقف:* {signal['stop_loss']:.2f} (-3%)"""
+🛑 *وقف:* {signal['stop']:.2f}"""
             await send_msg(session, msg)
         await asyncio.sleep(0.5)
 
@@ -319,10 +304,8 @@ async def main():
     global market_open_sent, market_close_sent, current_date, daily_opportunities
     
     async with aiohttp.ClientSession() as session:
-        await send_msg(session, f"✅ *بوت التحليل والمضاربة يعمل بنجاح*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📌 للتحليل: اكتب الرمز (مثلاً 2222) في الخاص.")
-        
+        await send_msg(session, f"✅ *بوت التحليل والمضاربة يعمل*\n\n📌 اكتب الرمز (مثلاً 2222) للتحليل.\n📡 القناة للتنبيهات.")
         last_update_id = 0
-        
         while True:
             now_riyadh = datetime.now(RIYADH_TZ)
             market_open_time = now_riyadh.replace(hour=10, minute=0, second=0)
@@ -342,36 +325,31 @@ async def main():
                 await send_msg(session, f"🔔 *إغلاق السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
             
             try:
-                updates_url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
-                async with session.get(updates_url) as resp:
+                url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
+                async with session.get(url) as resp:
                     if resp.status == 200:
-                        updates_data = await resp.json()
-                        if updates_data.get("ok"):
-                            result = updates_data.get("result", [])
-                            for update in result:
+                        updates = await resp.json()
+                        if updates.get("ok"):
+                            for update in updates.get("result", []):
                                 if update["update_id"] >= last_update_id:
                                     last_update_id = update["update_id"] + 1
                                 if "message" in update and "text" in update["message"]:
                                     text = update["message"]["text"].strip()
                                     chat_id = update["message"]["chat"]["id"]
-                                    
                                     if str(chat_id) == str(CHAT_ID):
                                         continue
-                                    
-                                    text_lower = text.lower()
                                     if text.isdigit() and len(text) == 4:
                                         await handle_analysis_command(session, chat_id, text)
-                                    elif text_lower in ["/start", "start", "قائمة"]:
+                                    elif text.lower() in ["/start", "start", "قائمة"]:
                                         await send_msg(session, "📊 *مرحباً*\n\nاكتب الرمز (مثلاً 2222) للتحليل.", chat_id)
             except Exception as e:
-                print(f"خطأ في جلب الرسائل: {e}")
+                print(f"خطأ: {e}")
             
             if market_open_time <= now_riyadh <= market_close_time:
                 if now_riyadh.minute % 5 == 0 and now_riyadh.second < 5:
                     await scan_market_for_scalps(session, now_riyadh)
             
-            await asyncio.sleep(60)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    print(f"بدء البوت... {len(ACTIVE_TICKERS)} شركة")
     asyncio.run(main())
