@@ -77,16 +77,15 @@ ACTIVE_TICKERS = [t for t in ALL_TICKERS if t not in EXCLUDED]
 market_open_sent = False
 market_close_sent = False
 current_date = None
-alert_tracker = {}          
-stock_followup = {}         
-daily_opportunities = []    
+alert_tracker = {}
+stock_followup = {}
+daily_opportunities = []
 
 RSI_PERIOD = 14
 PREVIOUS_HIGH_LOOKBACK = 90
-
 SCALP_MIN_VOLUME_RATIO = 2.0
 SCALP_MIN_RSI = 30
-SCALP_COOLDOWN = 1800       
+SCALP_COOLDOWN = 1800
 
 def get_stock_display(ticker):
     code = ticker.replace(".SR", "")
@@ -130,7 +129,6 @@ def get_targets(price):
     return (price * 1.03, price * 1.06, price * 1.10)
 
 async def fetch_yahoo_data(ticker):
-    """جلب البيانات من Yahoo (للتحليل والقناة)"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -221,10 +219,9 @@ async def handle_analysis_command(session, chat_id, ticker_code=None):
         await send_msg(session, f"❌ الكود {ticker_code} غير موجود.", chat_id)
         return
     
-    # استخدام Yahoo للتحليل (تم إزالة Alpha Vantage)
     data = await fetch_yahoo_data(ticker)
     if not data:
-        await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code} من Yahoo.", chat_id)
+        await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code}.", chat_id)
         return
     
     analysis = await analyze_stock(ticker, data)
@@ -324,7 +321,7 @@ async def main():
     global market_open_sent, market_close_sent, current_date, daily_opportunities
     
     async with aiohttp.ClientSession() as session:
-        await send_msg(session, f"✅ *البوت يعمل بنجاح (Yahoo)*\n\n📊 {len(ACTIVE_TICKERS)} شركة\n📌 للتحليل: `/تحليل [الكود]`")
+        await send_msg(session, f"✅ *البوت يعمل بنجاح*\n\n📊 {len(ACTIVE_TICKERS)} شركة\n📌 للتحليل: `/تحليل [الكود]`")
         
         last_update_id = 0
         
