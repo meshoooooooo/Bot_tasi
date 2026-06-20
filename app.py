@@ -158,6 +158,7 @@ def get_targets(price):
 def get_trailing_stop(current_price, highest_price):
     return highest_price * (1 - TRAILING_STOP_PCT)
 
+# ============= دوال التحليل =============
 async def handle_analysis_command(session, chat_id, ticker_code=None):
     if ticker_code:
         ticker = f"{ticker_code}.SR"
@@ -280,6 +281,7 @@ async def handle_strategy_command(session, chat_id):
 📌 يتم تحديث قائمة الانعكاسات يومياً بعد إغلاق السوق."""
     await send_msg(session, msg, chat_id)
 
+# ============= دوال جلب البيانات =============
 async def fetch_full_data(ticker):
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -492,8 +494,10 @@ async def send_daily_summary(session):
     await send_msg(session, msg)
     daily_opportunities = []
 
+# ============= الدالة الرئيسية =============
 async def main():
     global market_open_sent, market_close_sent, current_date, daily_opportunities
     
     async with aiohttp.ClientSession() as session:
-        await send_msg(session, f"✅ *البوت يعمل الان جاري المتابعة*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📈 استراتيجية اختراق آخر قمة\n
+        # الرسالة الترحيبية
+        await send_msg(session, f"✅ *البوت يعمل الان جاري المتابعة*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📈 استراتيجية اختراق آخر قمة\n🎯 أهداف: {TARGET_1_P
