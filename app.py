@@ -6,9 +6,8 @@ import pytz
 import time
 import gc
 
-# ============= قراءة المتغيرات =============
 TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")  # هذا للمتابعات في القناة فقط
+CHAT_ID = os.getenv("CHAT_ID")
 
 if not TOKEN or not CHAT_ID:
     print("❌ خطأ: تأكد من إضافة BOT_TOKEN و CHAT_ID في Secrets")
@@ -80,6 +79,8 @@ alert_counters = {}
 tracker = {}
 stock_followup = {}
 daily_opportunities = []
+market_data_cache = []  # سنخزن بيانات السوق هنا
+cache_last_updated = None
 
 MIN_PRICE = 1.0
 MAX_PRICE = 150.0
@@ -106,12 +107,7 @@ def get_stock_display(ticker):
 
 async def send_msg(session, msg, chat_id=None):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id or CHAT_ID,
-        "text": msg,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True
-    }
+    payload = {"chat_id": chat_id or CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True}
     try:
         async with session.post(url, json=payload) as resp:
             if resp.status != 200:
@@ -120,7 +116,6 @@ async def send_msg(session, msg, chat_id=None):
         print(f"خطأ: {e}")
 
 async def send_inline_menu(session, chat_id):
-    """إرسال قائمة الأزرار التفاعلية"""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     keyboard = {
         "inline_keyboard": [
@@ -132,12 +127,7 @@ async def send_inline_menu(session, chat_id):
             [{"text": "📊 تحليل سهم (اكتب الكود)", "callback_data": "analyze"}]
         ]
     }
-    payload = {
-        "chat_id": chat_id,
-        "text": "📊 *قائمة تصنيفات الأسهم*\nاختر الفئة التي تريد عرضها:",
-        "parse_mode": "Markdown",
-        "reply_markup": keyboard
-    }
+    payload = {"chat_id": chat_id, "text": "📊 *قائمة تصنيفات الأسهم*\nاختر الفئة التي تريد عرضها:", "parse_mode": "Markdown", "reply_markup": keyboard}
     try:
         async with session.post(url, json=payload) as resp:
             if resp.status != 200:
@@ -145,22 +135,42 @@ async def send_inline_menu(session, chat_id):
     except Exception as e:
         print(f"خطأ: {e}")
 
-async def fetch_all_stocks_data():
-    """جلب بيانات جميع الأسهم للتصنيف"""
+def calculate_rsi(closes, period=14):
+    if len(closes) < period + 1: return 50
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        change = closes[-i] - closes[-i-1]
+        if change > 0: gains.append(change)
+        else: losses.append(abs(change))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0: return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def get_targets(price):
+    return (price * (1 + TARGET_1_PCT), price * (1 + TARGET_2_PCT), price * (1 + TARGET_3_PCT))
+
+def get_trailing_stop(current_price, highest_price):
+    return highest_price * (1 - TRAILING_STOP_PCT)
+
+async def refresh_market_data(session):
+    """تقوم بمسح السوق وتخزين البيانات (تُشغل عند فتح السوق فقط)"""
+    global market_data_cache, cache_last_updated
+    print("🔄 بدء مسح السوق وتخزين البيانات...")
     results = []
     for ticker in ACTIVE_TICKERS:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
             headers = {"User-Agent": "Mozilla/5.0"}
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as resp:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data.get("chart", {}).get("result"):
                             result = data["chart"]["result"][0]
                             meta = result.get("meta", {})
                             quote = result.get("indicators", {}).get("quote", [{}])[0]
-                            
                             current_price = meta.get("regularMarketPrice", 0)
                             previous_close = meta.get("previousClose", current_price)
                             current_volume = meta.get("regularMarketVolume", 0)
@@ -199,109 +209,85 @@ async def fetch_all_stocks_data():
         except:
             pass
         await asyncio.sleep(0.3)
-    return results
+    market_data_cache = results
+    cache_last_updated = datetime.now(RIYADH_TZ)
+    print(f"✅ تم مسح وتخزين {len(results)} شركة.")
+    await send_msg(session, f"📊 *تم تحديث قاعدة بيانات السوق*\n✅ عدد الشركات المحدثة: {len(results)}\n⏰ الوقت: {cache_last_updated.strftime('%H:%M:%S')}")
 
-def calculate_rsi(closes, period=14):
-    if len(closes) < period + 1:
-        return 50
-    gains, losses = [], []
-    for i in range(1, period + 1):
-        change = closes[-i] - closes[-i-1]
-        if change > 0:
-            gains.append(change)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(abs(change))
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def get_targets(price):
-    return (price * (1 + TARGET_1_PCT), price * (1 + TARGET_2_PCT), price * (1 + TARGET_3_PCT))
-
-def get_trailing_stop(current_price, highest_price):
-    return highest_price * (1 - TRAILING_STOP_PCT)
-
-# ============= معالجة ضغط الأزرار =============
-async def handle_callback_query(session, callback_data, chat_id, message_id):
-    await send_msg(session, "⏳ جاري مسح السوق وتصنيف الأسهم... يرجى الانتظار (قد يستغرق 30-60 ثانية).", chat_id)
+def get_filtered_stocks(category):
+    """تصفية البيانات من الذاكرة (يحدث فوراً بدون تأخير)"""
+    if not market_data_cache:
+        return []
     
-    data = await fetch_all_stocks_data()
-    
-    if callback_data == "breakouts":
-        filtered = [s for s in data if s["is_breakout_90d"] and s["change"] >= 2.0]
+    if category == "breakouts":
+        filtered = [s for s in market_data_cache if s["is_breakout_90d"] and s["change"] >= 2.0]
         filtered.sort(key=lambda x: x["change"], reverse=True)
-        title = "📈 *أفضل 10 أسهم اخترقت قمة 90 يوم*"
-        if not filtered:
-            await send_msg(session, "⚠️ لا توجد أسهم اخترقت قمة 90 يوم اليوم.", chat_id)
-            return
-        
-    elif callback_data == "ma50":
-        filtered = [s for s in data if s["is_above_ma50"] and s["change"] >= 1.5]
+        return filtered[:10]
+    elif category == "ma50":
+        filtered = [s for s in market_data_cache if s["is_above_ma50"] and s["change"] >= 1.5]
         filtered.sort(key=lambda x: x["change"], reverse=True)
-        title = "📈 *أفضل 10 أسهم فوق المتوسط 50*"
-        if not filtered:
-            await send_msg(session, "⚠️ لا توجد أسهم فوق المتوسط 50 بزخم حالياً.", chat_id)
-            return
-        
-    elif callback_data == "ma200":
-        filtered = [s for s in data if s["is_above_ma200"] and s["change"] >= 1.0]
+        return filtered[:10]
+    elif category == "ma200":
+        filtered = [s for s in market_data_cache if s["is_above_ma200"] and s["change"] >= 1.0]
         filtered.sort(key=lambda x: x["change"], reverse=True)
-        title = "📈 *أفضل 10 أسهم فوق المتوسط 200*"
-        if not filtered:
-            await send_msg(session, "⚠️ لا توجد أسهم فوق المتوسط 200 بزخم حالياً.", chat_id)
-            return
-        
-    elif callback_data == "reversal_up":
-        filtered = [s for s in data if s["price"] <= (s["low_30d"] * 1.05) and s["change"] >= 2.5 and s["volume_ratio"] >= 1.8 and s["rsi"] < 50]
+        return filtered[:10]
+    elif category == "reversal_up":
+        filtered = [s for s in market_data_cache if s["price"] <= (s["low_30d"] * 1.05) and s["change"] >= 2.5 and s["volume_ratio"] >= 1.8 and s["rsi"] < 50]
         filtered.sort(key=lambda x: x["change"], reverse=True)
-        title = "🎣 *أفضل 5 فرص انعكاس صاعد (قاع)*"
-        if not filtered:
-            await send_msg(session, "⚠️ لا توجد أسهم بانعكاس صاعد واضح اليوم.", chat_id)
-            return
-        
-    elif callback_data == "volume":
-        filtered = [s for s in data if s["volume_ratio"] >= 3.0 and s["change"] >= 1.0]
+        return filtered[:5]
+    elif category == "volume":
+        filtered = [s for s in market_data_cache if s["volume_ratio"] >= 3.0 and s["change"] >= 1.0]
         filtered.sort(key=lambda x: x["volume_ratio"], reverse=True)
-        title = "🔥 *أفضل 5 أسهم بحجم استثنائي (3x المتوسط)*"
-        if not filtered:
-            await send_msg(session, "⚠️ لا توجد أسهم بحجم استثنائي حالياً.", chat_id)
-            return
-    
-    elif callback_data == "analyze":
+        return filtered[:5]
+    return []
+
+async def handle_callback_query(session, callback_data, chat_id, message_id):
+    if callback_data == "analyze":
         await send_msg(session, "📊 *لتحليل سهم:*\nأرسل الأمر: `/تحليل [الكود]`\nمثال: `/تحليل 2222`", chat_id)
         return
-
-    # بناء الرسالة
-    msg = f"{title}\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
-    limit = 10 if callback_data in ["breakouts", "ma50", "ma200"] else 5
-    for i, s in enumerate(filtered[:limit], 1):
-        if callback_data in ["breakouts", "ma50", "ma200"]:
-            msg += f"{i}. *{s['display']}*\n   💵 {s['price']:.2f} ريال | زخم +{s['change']:.2f}%\n   📊 RSI: {s['rsi']:.0f} | حجم: {s['volume_ratio']:.1f}x\n\n"
-        elif callback_data == "reversal_up":
-            msg += f"{i}. *{s['display']}*\n   💵 {s['price']:.2f} ريال | صعود +{s['change']:.2f}%\n   📊 حجم {s['volume_ratio']:.1f}x | RSI: {s['rsi']:.0f}\n   🛑 وقف: {s['low_30d']*0.97:.2f}\n\n"
-        elif callback_data == "volume":
-            msg += f"{i}. *{s['display']}*\n   💵 {s['price']:.2f} ريال | زخم +{s['change']:.2f}%\n   📊 الحجم: {s['volume_ratio']:.1f}x المتوسط\n\n"
     
-    msg += "\n━━━━━━━━━━━━━━━━━━━━━\nللعودة للقائمة الرئيسية، أرسل `/start` أو اكتب `قائمة`."
+    # التحقق من وجود البيانات
+    if not market_data_cache:
+        await send_msg(session, "⚠️ البيانات لم تُحمل بعد. يرجى الانتظار حتى افتتاح السوق (10:00 صباحاً).", chat_id)
+        return
+    
+    filtered = get_filtered_stocks(callback_data)
+    
+    titles = {
+        "breakouts": "📈 *أفضل 10 أسهم اخترقت قمة 90 يوم*",
+        "ma50": "📈 *أفضل 10 أسهم فوق المتوسط 50*",
+        "ma200": "📈 *أفضل 10 أسهم فوق المتوسط 200*",
+        "reversal_up": "🎣 *أفضل 5 فرص انعكاس صاعد (قاع)*",
+        "volume": "🔥 *أفضل 5 أسهم بحجم استثنائي (3x المتوسط)*"
+    }
+    
+    title = titles.get(callback_data, "📊 القائمة")
+    
+    if not filtered:
+        await send_msg(session, f"{title}\n\n⚠️ لا توجد أسهم تنطبق عليها الشروط حالياً.", chat_id)
+        return
+    
+    msg = f"{title}\n📅 {datetime.now(RIYADH_TZ).strftime('%Y-%m-%d %H:%M')}\n━━━━━━━━━━━━━━━━━━━━━\n\n"
+    for i, s in enumerate(filtered, 1):
+        msg += f"{i}. *{s['display']}*\n   💵 {s['price']:.2f} ريال | زخم +{s['change']:.2f}%\n"
+        if callback_data == "reversal_up":
+            msg += f"   📊 حجم {s['volume_ratio']:.1f}x | RSI: {s['rsi']:.0f}\n   🛑 وقف: {s['low_30d']*0.97:.2f}\n\n"
+        elif callback_data == "volume":
+            msg += f"   📊 الحجم: {s['volume_ratio']:.1f}x المتوسط\n\n"
+        else:
+            msg += f"   📊 RSI: {s['rsi']:.0f} | حجم: {s['volume_ratio']:.1f}x\n\n"
     await send_msg(session, msg, chat_id)
 
-# ============= معالجة الأوامر النصية =============
 async def handle_analysis_command(session, chat_id, ticker_code):
     ticker = f"{ticker_code}.SR"
     if ticker not in ALL_TICKERS:
-        await send_msg(session, f"❌ الكود {ticker_code} غير صحيح أو غير موجود.", chat_id)
+        await send_msg(session, f"❌ الكود {ticker_code} غير صحيح.", chat_id)
         return
-    
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
         headers = {"User-Agent": "Mozilla/5.0"}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as resp:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers=headers) as resp:
                 if resp.status != 200:
                     await send_msg(session, f"❌ تعذر جلب بيانات {ticker_code}.", chat_id)
                     return
@@ -315,7 +301,7 @@ async def handle_analysis_command(session, chat_id, ticker_code):
                 current_price = meta.get("regularMarketPrice", 0)
                 previous_close = meta.get("previousClose", current_price)
                 current_volume = meta.get("regularMarketVolume", 0)
-                if current_price <= 0 or current_volume <= 0:
+                if current_price <= 0:
                     await send_msg(session, f"❌ بيانات السهم غير متاحة.", chat_id)
                     return
                 closes = quote.get("close", [])
@@ -328,14 +314,11 @@ async def handle_analysis_command(session, chat_id, ticker_code):
                 ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else current_price
                 high_90d = max(highs[-90:]) if len(highs) >= 90 else current_price
                 low_30d = min(lows[-30:]) if len(lows) >= 30 else current_price
-                
                 display = get_stock_display(ticker)
                 target1, target2, target3 = get_targets(current_price)
                 trailing_stop = get_trailing_stop(current_price, current_price)
-                
                 is_breakout = current_price > high_90d
                 is_reversal = (current_price <= low_30d * 1.05 and change >= 2.0 and volume_ratio >= 1.8 and rsi < 45)
-                
                 msg = f"""📊 *تحليل شامل لـ {display}*
 
 💰 السعر: {current_price:.2f} ريال | التغيير: +{change:.2f}%
@@ -354,18 +337,13 @@ async def handle_analysis_command(session, chat_id, ticker_code):
 📌 القمة السابقة: {high_90d:.2f} | القاع 30 يوم: {low_30d:.2f}"""
                 await send_msg(session, msg, chat_id)
     except:
-        await send_msg(session, f"❌ خطأ في جلب البيانات.", chat_id)
+        await send_msg(session, f"❌ خطأ.", chat_id)
 
-# ============= الدالة الرئيسية =============
 async def main():
-    global market_open_sent, market_close_sent, current_date, daily_opportunities
-    
+    global market_open_sent, market_close_sent, current_date, daily_opportunities, market_data_cache
     async with aiohttp.ClientSession() as session:
-        # رسالة بدء التشغيل للقناة
-        await send_msg(session, f"✅ *بوت التصنيفات والتحليل يعمل الآن*\n\n📊 {len(ACTIVE_TICKERS)} شركة تحت المراقبة\n📈 استراتيجية اختراق قمة / متوسطات\n\n🤖 للبدء، أرسل `/start` أو `قائمة` في المحادثة الخاصة.")
-        
+        await send_msg(session, f"✅ *بوت التصنيفات يعمل الآن*\n\n📊 ينتظر افتتاح السوق لجلب البيانات.\n🤖 للبدء، أرسل `/start` أو `قائمة`.")
         last_update_id = 0
-        
         while True:
             now_riyadh = datetime.now(RIYADH_TZ)
             market_open_time = now_riyadh.replace(hour=10, minute=0, second=0)
@@ -380,32 +358,22 @@ async def main():
             if not market_open_sent and now_riyadh >= market_open_time and now_riyadh < market_close_time:
                 market_open_sent = True
                 await send_msg(session, f"🔔 *فتح السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
+                await refresh_market_data(session)  # مسح السوق وتخزينه مرة واحدة فقط
             
             if not market_close_sent and now_riyadh >= market_close_time:
                 market_close_sent = True
-                await send_msg(session, f"🔔 *إغلاق السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}\n📊 جاري الملخص...")
-                if daily_opportunities:
-                    daily_opportunities.sort(key=lambda x: x['strength'], reverse=True)
-                    top_10 = daily_opportunities[:10]
-                    msg = f"📊 *ملخص نهاية اليوم - أفضل {len(top_10)} فرصة*\n"
-                    for i, opp in enumerate(top_10, 1):
-                        msg += f"{i}. {opp['display_name']} | قوة: {opp['strength']}/100\n"
-                    await send_msg(session, msg)
-                daily_opportunities = []
+                await send_msg(session, f"🔔 *إغلاق السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
+                market_data_cache = []  # تفريغ البيانات عند الإغلاق
             
-            # ============= معالجة الرسائل والأزرار =============
             try:
                 updates_url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
                 async with session.get(updates_url) as resp:
                     if resp.status == 200:
                         updates_data = await resp.json()
                         if updates_data.get("ok"):
-                            result = updates_data.get("result", [])
-                            for update in result:
+                            for update in updates_data.get("result", []):
                                 if update["update_id"] >= last_update_id:
                                     last_update_id = update["update_id"] + 1
-                                
-                                # معالجة ضغط الأزرار (Callback Query)
                                 if "callback_query" in update:
                                     cq = update["callback_query"]
                                     chat_id = cq["message"]["chat"]["id"]
@@ -413,81 +381,27 @@ async def main():
                                     message_id = cq["message"]["message_id"]
                                     await handle_callback_query(session, data, chat_id, message_id)
                                     continue
-                                
-                                # معالجة الرسائل النصية
                                 if "message" in update and "text" in update["message"]:
                                     text = update["message"]["text"].strip()
                                     chat_id = update["message"]["chat"]["id"]
-                                    
                                     text_lower = text.lower()
-                                    
-                                    # قائمة الأوامر
                                     if text_lower == "/start" or text_lower == "قائمة":
                                         await send_inline_menu(session, chat_id)
-                                    
                                     elif text_lower.startswith("/تحليل") or text_lower.startswith("تحليل"):
                                         parts = text.split()
                                         if len(parts) > 1 and parts[1].isdigit():
                                             await handle_analysis_command(session, chat_id, parts[1])
                                         else:
                                             await send_msg(session, "📌 *لتحليل سهم:* أرسل `/تحليل [الكود]`\nمثال: `/تحليل 2222`", chat_id)
-                                    
                                     elif text_lower.startswith("/مساعده") or text_lower == "مساعده":
                                         await send_inline_menu(session, chat_id)
-                                    
                                     else:
-                                        # إذا كتب المستخدم كلمة غير معروفة، يرسل له القائمة
                                         if len(text) > 1:
                                             await send_inline_menu(session, chat_id)
             except Exception as e:
-                print(f"خطأ في جلب الرسائل: {e}")
-            
-            # ============= مراقبة السوق للتنبيهات =============
-            if market_open_time <= now_riyadh <= market_close_time:
-                # (تم إبقاء منطق المتابعة للقناة كما هو)
-                for i, ticker in enumerate(ACTIVE_TICKERS):
-                    try:
-                        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-                        headers = {"User-Agent": "Mozilla/5.0"}
-                        async with aiohttp.ClientSession() as session_inner:
-                            async with session_inner.get(url, headers=headers) as resp:
-                                if resp.status == 200:
-                                    data = await resp.json()
-                                    if data.get("chart", {}).get("result"):
-                                        result = data["chart"]["result"][0]
-                                        meta = result.get("meta", {})
-                                        quote = result.get("indicators", {}).get("quote", [{}])[0]
-                                        current_price = meta.get("regularMarketPrice", 0)
-                                        previous_close = meta.get("previousClose", current_price)
-                                        current_volume = meta.get("regularMarketVolume", 0)
-                                        if current_price > 0 and current_volume > 0:
-                                            closes = quote.get("close", [])
-                                            highs = quote.get("high", [])
-                                            change = ((current_price - previous_close) / previous_close) * 100 if previous_close > 0 else 0
-                                            avg_volume = sum(quote.get("volume", [])[-20:]) / 20 if len(quote.get("volume", [])) >= 20 else current_volume
-                                            volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-                                            rsi = calculate_rsi(closes)
-                                            ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else current_price
-                                            high_90d = max(highs[-90:]) if len(highs) >= 90 else current_price
-                                            
-                                            is_breakout_90d = current_price > high_90d
-                                            is_high_volume = volume_ratio >= MIN_VOLUME_RATIO
-                                            is_good_momentum = change >= MIN_MOMENTUM
-                                            is_good_rsi = RSI_MIN <= rsi <= RSI_MAX
-                                            
-                                            if is_breakout_90d and is_high_volume and is_good_momentum and is_good_rsi:
-                                                display_name = get_stock_display(ticker)
-                                                strength = 70
-                                                daily_opportunities.append({'display_name': display_name, 'strength': strength})
-                    except:
-                        pass
-                    if (i + 1) % 20 == 0:
-                        gc.collect()
-                        await asyncio.sleep(0.5)
-                gc.collect()
-            
+                print(f"خطأ: {e}")
             await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    print(f"بدء البوت... {len(ACTIVE_TICKERS)} شركة")
+    print("بدء البوت...")
     asyncio.run(main())
