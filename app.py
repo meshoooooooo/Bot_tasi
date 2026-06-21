@@ -132,30 +132,22 @@ async def fetch_data(ticker):
         headers = {"User-Agent": "Mozilla/5.0"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
-                # نتحقق من حالة الاتصال
                 if resp.status != 200:
                     return {"error": f"تعذر الاتصال بـ Yahoo (خطأ {resp.status})"}
-                
                 data = await resp.json()
                 if not data.get("chart", {}).get("result"):
                     return {"error": "لم يتم العثور على بيانات لهذا الرمز في قاعدة بيانات Yahoo"}
-                
                 result = data["chart"]["result"][0]
                 meta = result.get("meta", {})
                 quote = result.get("indicators", {}).get("quote", [{}])[0]
-                
                 price = meta.get("regularMarketPrice", 0)
                 if price <= 0:
                     return {"error": "البيانات الموجودة غير صالحة (سعر السهم غير متوفر)"}
-                
                 closes = quote.get("close", [])
                 highs = quote.get("high", [])
                 lows = quote.get("low", [])
-                
-                # إذا لم توجد شموع كافية، نرسل خطأ واضحاً
                 if not closes or len(closes) < 5:
                     return {"error": "تاريخ البيانات لهذا السهم قصير جداً، لا يمكن تحليله حالياً"}
-                
                 return {
                     "success": True,
                     "price": price,
@@ -219,12 +211,9 @@ async def handle_analysis_command(session, chat_id, code):
         return
     
     data = await fetch_data(ticker)
-    
-    # معالجة الأخطاء بذكاء
     if data.get("error"):
         await send_msg(session, f"❌ تعذر تحليل الرمز {code}\n\nالسبب: {data['error']}\n\n💡 ملاحظة: إذا كان السهم مدرجاً حديثاً، قد تحتاج للانتظار بضعة أيام حتى تتوفر بياناته في Yahoo.", chat_id)
         return
-    
     if not data.get("success"):
         await send_msg(session, f"❌ حدث خطأ غير معروف أثناء محاولة تحليل {code}.", chat_id)
         return
@@ -330,15 +319,19 @@ async def main():
                 current_date = now_riyadh.date()
                 market_open_sent = False
                 market_close_sent = False
+                alert_tracker = {}  # تصفير متعقب التنبيهات مع بداية يوم جديد
             
+            # إرسال فتح السوق مرة واحدة فقط
             if not market_open_sent and now_riyadh >= market_open_time and now_riyadh < market_close_time:
                 market_open_sent = True
                 await send_msg(session, f"🔔 *فتح السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
             
+            # إرسال إغلاق السوق مرة واحدة فقط
             if not market_close_sent and now_riyadh >= market_close_time:
                 market_close_sent = True
                 await send_msg(session, f"🔔 *إغلاق السوق*\n⏰ {now_riyadh.strftime('%H:%M:%S')}")
             
+            # معالجة الأوامر في الخاص
             try:
                 url = f"https://api.telegram.org/bot{TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
                 async with session.get(url) as resp:
@@ -360,11 +353,12 @@ async def main():
             except Exception as e:
                 print(f"خطأ: {e}")
             
+            # أثناء التداول: فحص السوق بحثاً عن مضاربات
             if market_open_time <= now_riyadh <= market_close_time:
                 if now_riyadh.minute % 5 == 0 and now_riyadh.second < 5:
                     await scan_market_for_scalps(session, now_riyadh)
             
-            await asyncio.sleep(5)
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
     asyncio.run(main())
